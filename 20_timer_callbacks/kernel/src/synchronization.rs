@@ -11,6 +11,7 @@
 //!   - <https://doc.rust-lang.org/std/cell/index.html>
 
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 //--------------------------------------------------------------------------------------------------
 // Public Definitions
@@ -69,6 +70,25 @@ where
     data: UnsafeCell<T>,
 }
 
+/// A real spinlock providing mutual exclusion across cores.
+///
+/// Unlike `IRQSafeNullLock` (which only masks IRQs on the local core and relies on the fact that,
+/// historically, no other core was ever running concurrently), `SpinLock` uses an atomic
+/// compare-and-swap loop to guarantee that at most one core holds the lock at any given time. This
+/// is the primitive needed once secondary cores are actually executing and contending for shared
+/// state.
+///
+/// IRQs are masked on the local core while the lock is held, to prevent a local interrupt handler
+/// from trying to re-acquire a lock this core already holds (which would deadlock, since this is
+/// not a re-entrant lock).
+pub struct SpinLock<T>
+where
+    T: ?Sized,
+{
+    locked: AtomicBool,
+    data: UnsafeCell<T>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Public Code
 //--------------------------------------------------------------------------------------------------
@@ -92,6 +112,19 @@ impl<T> InitStateLock<T> {
     /// Create an instance.
     pub const fn new(data: T) -> Self {
         Self {
+            data: UnsafeCell::new(data),
+        }
+    }
+}
+
+unsafe impl<T> Send for SpinLock<T> where T: ?Sized + Send {}
+unsafe impl<T> Sync for SpinLock<T> where T: ?Sized + Send {}
+
+impl<T> SpinLock<T> {
+    /// Create an instance.
+    pub const fn new(data: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
             data: UnsafeCell::new(data),
         }
     }
@@ -137,6 +170,37 @@ impl<T> interface::ReadWriteEx for InitStateLock<T> {
         let data = unsafe { &*self.data.get() };
 
         f(data)
+    }
+}
+
+impl<T> interface::Mutex for SpinLock<T> {
+    type Data = T;
+
+    fn lock<'a, R>(&'a self, f: impl FnOnce(&'a mut Self::Data) -> R) -> R {
+        // Mask IRQs on this core first, so a local interrupt handler can never try to reacquire
+        // this lock while we hold it (which would deadlock).
+        let restore_irqs = exception::asynchronous::local_irq_mask_save();
+
+        // Spin until we win the compare-and-swap, i.e. until we are the one who flips `locked`
+        // from `false` to `true`. This is what actually provides mutual exclusion between cores;
+        // IRQ masking alone only protects against re-entrancy on the same core.
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+
+        let data = unsafe { &mut *self.data.get() };
+        let ret = f(data);
+
+        // Release the lock, making it visible to spinning cores, then restore this core's IRQ
+        // mask state.
+        self.locked.store(false, Ordering::Release);
+        exception::asynchronous::local_irq_restore(restore_irqs);
+
+        ret
     }
 }
 

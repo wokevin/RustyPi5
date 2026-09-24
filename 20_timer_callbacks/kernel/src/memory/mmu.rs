@@ -8,9 +8,13 @@
 #[path = "../_arch/aarch64/memory/mmu.rs"]
 mod arch_mmu;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "../_arch/x86_64/memory/mmu.rs"]
+mod arch_mmu;
+
 mod mapping_record;
 mod page_alloc;
-mod translation_table;
+pub(crate) mod translation_table;
 mod types;
 
 use crate::{

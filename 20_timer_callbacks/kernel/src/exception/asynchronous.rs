@@ -7,6 +7,11 @@
 #[cfg(target_arch = "aarch64")]
 #[path = "../_arch/aarch64/exception/asynchronous.rs"]
 mod arch_asynchronous;
+
+#[cfg(target_arch = "x86_64")]
+#[path = "../_arch/x86_64/exception/asynchronous.rs"]
+mod arch_asynchronous;
+
 mod null_irq_manager;
 
 use crate::{bsp, synchronization};

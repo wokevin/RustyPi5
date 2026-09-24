@@ -124,17 +124,18 @@
 #![feature(step_trait)]
 #![feature(trait_alias)]
 #![feature(unchecked_math)]
-#![no_std]
+#![cfg_attr(not(feature = "bsp_host"), no_std)]
 // Testing
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]
-#![reexport_test_harness_main = "test_main"]
-#![test_runner(crate::test_runner)]
+
+#[cfg(feature = "bsp_host")]
+extern crate std;
 
 extern crate alloc;
 
 mod panic_wait;
-mod synchronization;
+pub mod synchronization;
 
 pub mod backtrace;
 pub mod bsp;

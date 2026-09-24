@@ -4,13 +4,17 @@
 
 //! Device driver.
 
-#[cfg(feature = "bsp_rpi4")]
+#[cfg(any(feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 mod arm;
-#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4"))]
+#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 mod bcm;
 mod common;
+#[cfg(feature = "bsp_rpi3")]
+mod dwc2;
 
-#[cfg(feature = "bsp_rpi4")]
+#[cfg(any(feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 pub use arm::*;
-#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4"))]
+#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 pub use bcm::*;
+#[cfg(feature = "bsp_rpi3")]
+pub use dwc2::*;

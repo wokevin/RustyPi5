@@ -13,11 +13,14 @@
 #[path = "_arch/aarch64/time.rs"]
 mod arch_time;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "_arch/x86_64/time.rs"]
+mod arch_time;
+
 use crate::{
     driver, exception,
     exception::asynchronous::IRQNumber,
     synchronization::{interface::Mutex, IRQSafeNullLock},
-    warn,
 };
 use alloc::{boxed::Box, vec::Vec};
 use core::{
@@ -212,36 +215,39 @@ impl exception::asynchronous::interface::IRQHandler for TimeManager {
     fn handle(&self) -> Result<(), &'static str> {
         arch_time::conclude_timeout_irq();
 
-        let maybe_timeout: Option<Timeout> = self.queue.lock(|queue| {
-            let next_due_time = queue.peek_next_due_time()?;
-            if next_due_time > self.uptime() {
-                return None;
-            }
+        // Process every timeout that is currently due, not just one. Multiple timeouts can share
+        // (almost) the same due time -- e.g. a one-shot and a periodic timeout both landing at the
+        // same tick -- and handling only a single one per IRQ would leave the comparator
+        // immediately re-triggering for the next one, which the ISR would then classify as
+        // "spurious" because the queue's front item hadn't quite become due yet by the time it was
+        // checked again.
+        loop {
+            let maybe_timeout: Option<Timeout> = self.queue.lock(|queue| {
+                let next_due_time = queue.peek_next_due_time()?;
+                if next_due_time > self.uptime() {
+                    return None;
+                }
 
-            let mut timeout = queue.pop().unwrap();
+                let mut timeout = queue.pop().unwrap();
 
-            // Refresh as early as possible to prevent drift.
-            if timeout.is_periodic() {
-                timeout.refresh();
-            }
+                // Refresh as early as possible to prevent drift.
+                if timeout.is_periodic() {
+                    timeout.refresh();
+                }
 
-            Some(timeout)
-        });
+                Some(timeout)
+            });
 
-        let timeout = match maybe_timeout {
-            None => {
-                warn!("Spurious timeout IRQ");
-                return Ok(());
-            }
-            Some(t) => t,
-        };
+            let timeout = match maybe_timeout {
+                None => break,
+                Some(t) => t,
+            };
 
-        // Important: Call the callback while not holding any lock, because the callback might
-        // attempt to modify data that is protected by a lock (in particular, the timeout queue
-        // itself).
-        (timeout.callback)();
+            // Important: Call the callback while not holding any lock, because the callback might
+            // attempt to modify data that is protected by a lock (in particular, the timeout queue
+            // itself).
+            (timeout.callback)();
 
-        self.queue.lock(|queue| {
             if timeout.is_periodic() {
                 // There might be some overhead involved in the periodic path, because the timeout
                 // item is first popped from the underlying Vec and then pushed back again. It could
@@ -250,9 +256,12 @@ impl exception::asynchronous::interface::IRQHandler for TimeManager {
                 //
                 // We are not going this route on purpose, though. It allows to keep the code simple
                 // and the focus on the high-level concepts.
-                queue.push(timeout);
-            };
+                self.queue.lock(|queue| queue.push(timeout));
+            }
+        }
 
+        // Reprogram the comparator once, after all currently-due timeouts have been drained.
+        self.queue.lock(|queue| {
             if let Some(due_time) = queue.peek_next_due_time() {
                 arch_time::set_timeout_irq(due_time);
             }

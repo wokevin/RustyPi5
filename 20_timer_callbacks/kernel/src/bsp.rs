@@ -6,8 +6,20 @@
 
 mod device_driver;
 
-#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4"))]
+#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 mod raspberrypi;
 
-#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4"))]
+#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 pub use raspberrypi::*;
+
+#[cfg(feature = "bsp_host")]
+mod host;
+
+#[cfg(feature = "bsp_host")]
+pub use host::*;
+
+#[cfg(feature = "bsp_hyperv_x86")]
+mod hyperv_x86;
+
+#[cfg(feature = "bsp_hyperv_x86")]
+pub use hyperv_x86::*;

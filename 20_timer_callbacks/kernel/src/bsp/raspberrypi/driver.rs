@@ -28,8 +28,11 @@ static mut GPIO: MaybeUninit<device_driver::GPIO> = MaybeUninit::uninit();
 static mut INTERRUPT_CONTROLLER: MaybeUninit<device_driver::InterruptController> =
     MaybeUninit::uninit();
 
-#[cfg(feature = "bsp_rpi4")]
+#[cfg(any(feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 static mut INTERRUPT_CONTROLLER: MaybeUninit<device_driver::GICv2> = MaybeUninit::uninit();
+
+#[cfg(feature = "bsp_rpi3")]
+static mut USB: MaybeUninit<device_driver::Dwc2Usb> = MaybeUninit::uninit();
 
 //--------------------------------------------------------------------------------------------------
 // Private Code
@@ -95,7 +98,7 @@ unsafe fn instantiate_interrupt_controller() -> Result<(), &'static str> {
 }
 
 /// This must be called only after successful init of the memory subsystem.
-#[cfg(feature = "bsp_rpi4")]
+#[cfg(any(feature = "bsp_rpi4", feature = "bsp_rpi5"))]
 unsafe fn instantiate_interrupt_controller() -> Result<(), &'static str> {
     let gicd_mmio_descriptor = MMIODescriptor::new(mmio::GICD_START, mmio::GICD_SIZE);
     let gicd_virt_addr = memory::mmu::kernel_map_mmio("GICv2 GICD", &gicd_mmio_descriptor)?;
@@ -157,6 +160,33 @@ unsafe fn driver_interrupt_controller() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// This must be called only after successful init of the memory subsystem.
+#[cfg(feature = "bsp_rpi3")]
+unsafe fn instantiate_usb() -> Result<(), &'static str> {
+    let mmio_descriptor = MMIODescriptor::new(mmio::USB_START, mmio::USB_SIZE);
+    let virt_addr =
+        memory::mmu::kernel_map_mmio(device_driver::Dwc2Usb::COMPATIBLE, &mmio_descriptor)?;
+
+    USB.write(device_driver::Dwc2Usb::new(virt_addr));
+
+    Ok(())
+}
+
+/// Function needs to ensure that driver registration happens only after correct instantiation.
+#[cfg(feature = "bsp_rpi3")]
+unsafe fn driver_usb() -> Result<(), &'static str> {
+    instantiate_usb()?;
+
+    let usb_descriptor = generic_driver::DeviceDriverDescriptor::new(
+        USB.assume_init_ref(),
+        None,
+        Some(exception::asynchronous::irq_map::USB),
+    );
+    generic_driver::driver_manager().register_driver(usb_descriptor);
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Public Code
 //--------------------------------------------------------------------------------------------------
@@ -175,6 +205,8 @@ pub unsafe fn init() -> Result<(), &'static str> {
     driver_uart()?;
     driver_gpio()?;
     driver_interrupt_controller()?;
+    #[cfg(feature = "bsp_rpi3")]
+    driver_usb()?;
 
     INIT_DONE.store(true, Ordering::Relaxed);
     Ok(())

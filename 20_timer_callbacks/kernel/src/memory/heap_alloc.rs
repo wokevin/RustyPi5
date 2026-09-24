@@ -28,7 +28,11 @@ pub struct HeapAllocator {
 // Global instances
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(not(feature = "bsp_host"))]
 #[global_allocator]
+static KERNEL_HEAP_ALLOCATOR: HeapAllocator = HeapAllocator::new();
+
+#[cfg(feature = "bsp_host")]
 static KERNEL_HEAP_ALLOCATOR: HeapAllocator = HeapAllocator::new();
 
 //--------------------------------------------------------------------------------------------------
@@ -62,6 +66,7 @@ fn debug_print_alloc_dealloc(operation: &'static str, ptr: *mut u8, layout: Layo
 //--------------------------------------------------------------------------------------------------
 use synchronization::interface::Mutex;
 
+#[cfg(not(feature = "bsp_host"))]
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
     panic!("Allocation error: {:?}", layout)

@@ -2,7 +2,6 @@
 ##
 ## Copyright (c) 2018-2023 Andre Richter <andre.o.richter@gmail.com>
 
-include ../common/docker.mk
 include ../common/format.mk
 include ../common/operating_system.mk
 
@@ -21,6 +20,13 @@ ifdef DEBUG_PRINTS
     FEATURES = --features debug_prints
 endif
 
+# Optional: use PSCI CPU_ON instead of the classic spin-table release mechanism on Pi 3/4 builds.
+# Needed for QEMU (raspi3b/raspi4b), whose emulated firmware implements PSCI, not the real
+# hardware's ROM spin-table polling loop.
+ifdef QEMU_PSCI
+    FEATURES += --features qemu
+endif
+
 # Optional integration test name.
 ifdef TEST
     TEST_ARG = --test $(TEST)
@@ -28,6 +34,8 @@ else
     TEST_ARG = --test '*'
 endif
 
+# Default to single core unless overridden.
+QEMU_SMP ?= 1
 
 
 ##--------------------------------------------------------------------------------------------------
@@ -39,13 +47,13 @@ ifeq ($(BSP),rpi3)
     TARGET            = aarch64-unknown-none-softfloat
     KERNEL_BIN        = kernel8.img
     QEMU_BINARY       = qemu-system-aarch64
-    QEMU_MACHINE_TYPE = raspi3
+    QEMU_MACHINE_TYPE = raspi3b
     QEMU_RELEASE_ARGS = -serial stdio -display none
     QEMU_TEST_ARGS    = $(QEMU_RELEASE_ARGS) -semihosting
     OBJDUMP_BINARY    = aarch64-none-elf-objdump
     NM_BINARY         = aarch64-none-elf-nm
     READELF_BINARY    = aarch64-none-elf-readelf
-    OPENOCD_ARG       = -f /openocd/tcl/interface/ftdi/olimex-arm-usb-tiny-h.cfg -f /openocd/rpi3.cfg
+    OPENOCD_ARG       = -f /openocd/tcl/interface/ftdi/ Olimex-arm-usb-tiny-h.cfg -f /openocd/rpi3.cfg
     JTAG_BOOT_IMAGE   = ../X1_JTAG_boot/jtag_boot_rpi3.img
     LD_SCRIPT_PATH    = $(shell pwd)/kernel/src/bsp/raspberrypi
     RUSTC_MISC_ARGS   = -C target-cpu=cortex-a53 -C force-frame-pointers
@@ -59,10 +67,24 @@ else ifeq ($(BSP),rpi4)
     OBJDUMP_BINARY    = aarch64-none-elf-objdump
     NM_BINARY         = aarch64-none-elf-nm
     READELF_BINARY    = aarch64-none-elf-readelf
-    OPENOCD_ARG       = -f /openocd/tcl/interface/ftdi/olimex-arm-usb-tiny-h.cfg -f /openocd/rpi4.cfg
+    OPENOCD_ARG       = -f /openocd/tcl/interface/ftdi/ Olimex-arm-usb-tiny-h.cfg -f /openocd/rpi4.cfg
     JTAG_BOOT_IMAGE   = ../X1_JTAG_boot/jtag_boot_rpi4.img
     LD_SCRIPT_PATH    = $(shell pwd)/kernel/src/bsp/raspberrypi
     RUSTC_MISC_ARGS   = -C target-cpu=cortex-a72 -C force-frame-pointers
+else ifeq ($(BSP),rpi5)
+    TARGET            = aarch64-unknown-none-softfloat
+    KERNEL_BIN        = kernel_2712.img
+    QEMU_BINARY       = $(QEMU_MISSING_STRING)
+    QEMU_MACHINE_TYPE =
+    QEMU_RELEASE_ARGS = -serial stdio -display none
+    QEMU_TEST_ARGS    = $(QEMU_RELEASE_ARGS) -semihosting
+    OBJDUMP_BINARY    = aarch64-none-elf-objdump
+    NM_BINARY         = aarch64-none-elf-nm
+    READELF_BINARY    = aarch64-none-elf-readelf
+    OPENOCD_ARG       = -f /openocd/tcl/interface/ftdi/ Olimex-arm-usb-tiny-h.cfg -f /openocd/rpi5.cfg
+    JTAG_BOOT_IMAGE   = ../X1_JTAG_boot/jtag_boot_rpi5.img
+    LD_SCRIPT_PATH    = $(shell pwd)/kernel/src/bsp/raspberrypi
+    RUSTC_MISC_ARGS   = -C target-cpu=cortex-a76 -C force-frame-pointers
 endif
 
 # Export for build.rs.
@@ -83,31 +105,17 @@ KERNEL_ELF_RAW      = target/$(TARGET)/release/kernel
 KERNEL_ELF_RAW_DEPS = $(filter-out %: ,$(file < $(KERNEL_ELF_RAW).d)) $(KERNEL_MANIFEST) $(LAST_BUILD_CONFIG)
 
 ##------------------------------------------------------------------------------
-## Translation tables
+## Translation tables: precompute the kernel translation tables and patch them
+## into the kernel ELF (Python port of the legacy Ruby tool; no Ruby dependency)
 ##------------------------------------------------------------------------------
-TT_TOOL_PATH = tools/translation_table_tool
+TT_TOOL_PATH = tools/translation_tools
 
-KERNEL_ELF_TTABLES      = target/$(TARGET)/release/kernel+ttables
-KERNEL_ELF_TTABLES_DEPS = $(KERNEL_ELF_RAW) $(wildcard $(TT_TOOL_PATH)/*)
+KERNEL_ELF_TTABLES      = $(KERNEL_ELF_RAW)_ttables
+KERNEL_ELF_TTABLES_DEPS = $(KERNEL_ELF_RAW) $(KERNEL_ELF_RAW_DEPS) \
+    $(TT_TOOL_PATH)/main.py $(TT_TOOL_PATH)/generic.py \
+    $(TT_TOOL_PATH)/kernel_elf.py $(TT_TOOL_PATH)/bsp.py $(TT_TOOL_PATH)/arch.py
 
-##------------------------------------------------------------------------------
-## Kernel symbols
-##------------------------------------------------------------------------------
-export KERNEL_SYMBOLS_TOOL_PATH = tools/kernel_symbols_tool
-
-KERNEL_ELF_TTABLES_SYMS = target/$(TARGET)/release/kernel+ttables+symbols
-
-# Unlike with KERNEL_ELF_RAW, we are not relying on dep-info here. One of the reasons being that the
-# name of the generated symbols file varies between runs, which can cause confusion.
-KERNEL_ELF_TTABLES_SYMS_DEPS = $(KERNEL_ELF_TTABLES) \
-    $(wildcard kernel_symbols/*)                     \
-    $(wildcard $(KERNEL_SYMBOLS_TOOL_PATH)/*)
-
-export TARGET
-export KERNEL_SYMBOLS_INPUT_ELF  = $(KERNEL_ELF_TTABLES)
-export KERNEL_SYMBOLS_OUTPUT_ELF = $(KERNEL_ELF_TTABLES_SYMS)
-
-KERNEL_ELF = $(KERNEL_ELF_TTABLES_SYMS)
+KERNEL_ELF = $(KERNEL_ELF_TTABLES)
 
 
 
@@ -137,37 +145,10 @@ OBJCOPY_CMD = rust-objcopy \
     --strip-all            \
     -O binary
 
-EXEC_QEMU          = $(QEMU_BINARY) -M $(QEMU_MACHINE_TYPE)
-EXEC_TT_TOOL       = ruby $(TT_TOOL_PATH)/main.rb
-EXEC_TEST_DISPATCH = ruby ../common/tests/dispatch.rb
-EXEC_MINIPUSH      = ruby ../common/serial/minipush.rb
-
-##------------------------------------------------------------------------------
-## Dockerization
-##------------------------------------------------------------------------------
-DOCKER_CMD            = docker run -t --rm -v $(shell pwd):/work/tutorial -w /work/tutorial
-DOCKER_CMD_INTERACT   = $(DOCKER_CMD) -i
-DOCKER_ARG_DIR_COMMON = -v $(shell pwd)/../common:/work/common
-DOCKER_ARG_DIR_JTAG   = -v $(shell pwd)/../X1_JTAG_boot:/work/X1_JTAG_boot
-DOCKER_ARG_DEV        = --privileged -v /dev:/dev
-DOCKER_ARG_NET        = --network host
-
-# DOCKER_IMAGE defined in include file (see top of this file).
-DOCKER_QEMU  = $(DOCKER_CMD_INTERACT) $(DOCKER_IMAGE)
-DOCKER_TOOLS = $(DOCKER_CMD) $(DOCKER_IMAGE)
-DOCKER_TEST  = $(DOCKER_CMD) $(DOCKER_ARG_DIR_COMMON) $(DOCKER_IMAGE)
-DOCKER_GDB   = $(DOCKER_CMD_INTERACT) $(DOCKER_ARG_NET) $(DOCKER_IMAGE)
-
-# Dockerize commands, which require USB device passthrough, only on Linux.
-ifeq ($(shell uname -s),Linux)
-    DOCKER_CMD_DEV = $(DOCKER_CMD_INTERACT) $(DOCKER_ARG_DEV)
-
-    DOCKER_CHAINBOOT = $(DOCKER_CMD_DEV) $(DOCKER_ARG_DIR_COMMON) $(DOCKER_IMAGE)
-    DOCKER_JTAGBOOT  = $(DOCKER_CMD_DEV) $(DOCKER_ARG_DIR_COMMON) $(DOCKER_ARG_DIR_JTAG) $(DOCKER_IMAGE)
-    DOCKER_OPENOCD   = $(DOCKER_CMD_DEV) $(DOCKER_ARG_NET) $(DOCKER_IMAGE)
-else
-    DOCKER_OPENOCD   = echo "Not yet supported on non-Linux systems."; \#
-endif
+EXEC_QEMU          = $(QEMU_BINARY) -M $(QEMU_MACHINE_TYPE) -smp $(QEMU_SMP)
+EXEC_TEST_DISPATCH = python3 ../common/tests/dispatch.py
+EXEC_MINIPUSH      = python3 ../common/serial/minipush.py
+EXEC_TT_TOOL       = .venv/bin/python3 $(TT_TOOL_PATH)/main.py
 
 
 
@@ -194,30 +175,15 @@ $(KERNEL_ELF_RAW): $(KERNEL_ELF_RAW_DEPS)
 	@RUSTFLAGS="$(RUSTFLAGS_PEDANTIC)" $(RUSTC_CMD)
 
 ##------------------------------------------------------------------------------
-## Precompute the kernel translation tables and patch them into the kernel ELF
-##------------------------------------------------------------------------------
-$(KERNEL_ELF_TTABLES): $(KERNEL_ELF_TTABLES_DEPS)
-	$(call color_header, "Precomputing kernel translation tables and patching kernel ELF")
-	@cp $(KERNEL_ELF_RAW) $(KERNEL_ELF_TTABLES)
-	@$(DOCKER_TOOLS) $(EXEC_TT_TOOL) $(BSP) $(KERNEL_ELF_TTABLES)
-
-##------------------------------------------------------------------------------
-## Generate kernel symbols and patch them into the kernel ELF
-##------------------------------------------------------------------------------
-$(KERNEL_ELF_TTABLES_SYMS): $(KERNEL_ELF_TTABLES_SYMS_DEPS)
-	$(call color_header, "Generating kernel symbols and patching kernel ELF")
-	@$(MAKE) --no-print-directory -f kernel_symbols.mk
-
-##------------------------------------------------------------------------------
 ## Generate the stripped kernel binary
 ##------------------------------------------------------------------------------
-$(KERNEL_BIN): $(KERNEL_ELF_TTABLES_SYMS)
+$(KERNEL_BIN): $(KERNEL_ELF)
 	$(call color_header, "Generating stripped binary")
-	@$(OBJCOPY_CMD) $(KERNEL_ELF_TTABLES_SYMS) $(KERNEL_BIN)
+	@$(OBJCOPY_CMD) $(KERNEL_ELF) $(KERNEL_BIN)
 	$(call color_progress_prefix, "Name")
 	@echo $(KERNEL_BIN)
 	$(call color_progress_prefix, "Size")
-	$(call disk_usage_KiB, $(KERNEL_BIN))
+	@$(call disk_usage_KiB, $(KERNEL_BIN))
 
 ##------------------------------------------------------------------------------
 ## Generate the documentation
@@ -238,7 +204,7 @@ else # QEMU is supported.
 
 qemu: $(KERNEL_BIN)
 	$(call color_header, "Launching QEMU")
-	@$(DOCKER_QEMU) $(EXEC_QEMU) $(QEMU_RELEASE_ARGS) -kernel $(KERNEL_BIN)
+	@$(EXEC_QEMU) $(QEMU_RELEASE_ARGS) -kernel $(KERNEL_BIN)
 
 endif
 
@@ -246,7 +212,7 @@ endif
 ## Push the kernel to the real HW target
 ##------------------------------------------------------------------------------
 chainboot: $(KERNEL_BIN)
-	@$(DOCKER_CHAINBOOT) $(EXEC_MINIPUSH) $(DEV_SERIAL) $(KERNEL_BIN)
+	@$(EXEC_MINIPUSH) $(DEV_SERIAL) $(KERNEL_BIN)
 
 ##------------------------------------------------------------------------------
 ## Run clippy
@@ -267,14 +233,14 @@ clean:
 ##------------------------------------------------------------------------------
 readelf: $(KERNEL_ELF)
 	$(call color_header, "Launching readelf")
-	@$(DOCKER_TOOLS) $(READELF_BINARY) --headers $(KERNEL_ELF)
+	@$(READELF_BINARY) --headers $(KERNEL_ELF)
 
 ##------------------------------------------------------------------------------
 ## Run objdump
 ##------------------------------------------------------------------------------
 objdump: $(KERNEL_ELF)
 	$(call color_header, "Launching objdump")
-	@$(DOCKER_TOOLS) $(OBJDUMP_BINARY) --disassemble --demangle \
+	@$(OBJDUMP_BINARY) --disassemble --demangle \
                 --section .text   \
                 --section .rodata \
                 $(KERNEL_ELF) | rustfilt
@@ -284,7 +250,7 @@ objdump: $(KERNEL_ELF)
 ##------------------------------------------------------------------------------
 nm: $(KERNEL_ELF)
 	$(call color_header, "Launching nm")
-	@$(DOCKER_TOOLS) $(NM_BINARY) --demangle --print-size $(KERNEL_ELF) | sort | rustfilt
+	@$(NM_BINARY) --demangle --print-size $(KERNEL_ELF) | sort | rustfilt
 
 
 
@@ -297,14 +263,14 @@ nm: $(KERNEL_ELF)
 ## Push the JTAG boot image to the real HW target
 ##------------------------------------------------------------------------------
 jtagboot:
-	@$(DOCKER_JTAGBOOT) $(EXEC_MINIPUSH) $(DEV_SERIAL) $(JTAG_BOOT_IMAGE)
+	@$(EXEC_MINIPUSH) $(DEV_SERIAL) $(JTAG_BOOT_IMAGE)
 
 ##------------------------------------------------------------------------------
 ## Start OpenOCD session
 ##------------------------------------------------------------------------------
 openocd:
 	$(call color_header, "Launching OpenOCD")
-	@$(DOCKER_OPENOCD) openocd $(OPENOCD_ARG)
+	@openocd $(OPENOCD_ARG)
 
 ##------------------------------------------------------------------------------
 ## Start GDB session
@@ -312,7 +278,7 @@ openocd:
 gdb-opt0: RUSTC_MISC_ARGS += -C opt-level=0
 gdb gdb-opt0: $(KERNEL_ELF)
 	$(call color_header, "Launching GDB")
-	@$(DOCKER_GDB) gdb-multiarch -q $(KERNEL_ELF)
+	@gdb-multiarch -q $(KERNEL_ELF)
 
 
 
@@ -335,7 +301,7 @@ else # QEMU is supported.
 ##------------------------------------------------------------------------------
 test_boot: $(KERNEL_BIN)
 	$(call color_header, "Boot test - $(BSP)")
-	@$(DOCKER_TEST) $(EXEC_TEST_DISPATCH) $(EXEC_QEMU) $(QEMU_RELEASE_ARGS) -kernel $(KERNEL_BIN)
+	@$(EXEC_TEST_DISPATCH) $(EXEC_QEMU) $(QEMU_RELEASE_ARGS) -kernel $(KERNEL_BIN)
 
 ##------------------------------------------------------------------------------
 ## Helpers for unit and integration test targets
@@ -348,20 +314,10 @@ define KERNEL_TEST_RUNNER
     cd $(shell pwd)
 
     TEST_ELF=$$(echo $$1 | sed -e 's/.*target/target/g')
-    TEST_ELF_SYMS="$${TEST_ELF}_syms"
     TEST_BINARY=$$(echo $$1.img | sed -e 's/.*target/target/g')
 
-    $(DOCKER_TOOLS) $(EXEC_TT_TOOL) $(BSP) $$TEST_ELF > /dev/null
-
-    # This overrides the two ENV variables. The other ENV variables that are required as input for
-    # the .mk file are set already because they are exported by this Makefile and this script is
-    # started by the same.
-    KERNEL_SYMBOLS_INPUT_ELF=$$TEST_ELF           \
-        KERNEL_SYMBOLS_OUTPUT_ELF=$$TEST_ELF_SYMS \
-        $(MAKE) --no-print-directory -f kernel_symbols.mk > /dev/null 2>&1
-
-    $(OBJCOPY_CMD) $$TEST_ELF_SYMS $$TEST_BINARY
-    $(DOCKER_TEST) $(EXEC_TEST_DISPATCH) $(EXEC_QEMU) $(QEMU_TEST_ARGS) -kernel $$TEST_BINARY
+    $(OBJCOPY_CMD) $$TEST_ELF $$TEST_BINARY
+    $(EXEC_TEST_DISPATCH) $(EXEC_QEMU) $(QEMU_TEST_ARGS) -kernel $$TEST_BINARY
 endef
 
 export KERNEL_TEST_RUNNER
@@ -391,3 +347,11 @@ test_integration:
 test: test_boot test_unit test_integration
 
 endif
+
+##------------------------------------------------------------------------------
+## Precompute the kernel translation tables and patch them into the kernel ELF
+##------------------------------------------------------------------------------
+$(KERNEL_ELF_TTABLES): $(KERNEL_ELF_TTABLES_DEPS)
+	$(call color_header, "Precomputing kernel translation tables and patching kernel ELF")
+	@cp $(KERNEL_ELF_RAW) $(KERNEL_ELF_TTABLES)
+	@$(EXEC_TT_TOOL) $(BSP) $(KERNEL_ELF_TTABLES)

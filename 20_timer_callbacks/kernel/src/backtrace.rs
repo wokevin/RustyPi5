@@ -8,6 +8,10 @@
 #[path = "_arch/aarch64/backtrace.rs"]
 mod arch_backtrace;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "_arch/x86_64/backtrace.rs"]
+mod arch_backtrace;
+
 use crate::{
     memory::{Address, Virtual},
     symbols,

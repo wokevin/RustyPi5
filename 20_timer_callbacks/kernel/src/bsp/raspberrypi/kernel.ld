@@ -8,6 +8,17 @@ INCLUDE kernel_virt_addr_space_size.ld;
 PAGE_SIZE = 64K;
 PAGE_MASK = PAGE_SIZE - 1;
 
+/* Size reserved per secondary core's stack. Must stay in sync with
+ * `bsp::raspberrypi::memory::SECONDARY_CORE_STACK_SIZE`. */
+SECONDARY_CORE_STACK_SIZE = 128K;
+
+/* Compile-time ceiling on the number of cores this board's static structures are sized for. This
+ * is not an assumption about how many cores actually exist or respond at boot — it only reserves
+ * stack memory for up to this many secondary cores. Must stay in sync with
+ * `bsp::raspberrypi::cpu::MAX_SUPPORTED_CORES`. */
+MAX_SUPPORTED_CORES = 8;
+NUM_SECONDARY_CORES = MAX_SUPPORTED_CORES - 1;
+
 /* The kernel's virtual address range will be:
  *
  * [END_ADDRESS_INCLUSIVE, START_ADDRESS]
@@ -33,10 +44,11 @@ ENTRY(__rpi_phys_binary_load_addr)
  */
 PHDRS
 {
-    segment_code            PT_LOAD FLAGS(5);
-    segment_data            PT_LOAD FLAGS(6);
-    segment_heap            PT_LOAD FLAGS(6);
-    segment_boot_core_stack PT_LOAD FLAGS(6);
+    segment_code                  PT_LOAD FLAGS(5);
+    segment_data                  PT_LOAD FLAGS(6);
+    segment_heap                  PT_LOAD FLAGS(6);
+    segment_secondary_core_stacks PT_LOAD FLAGS(6);
+    segment_boot_core_stack       PT_LOAD FLAGS(6);
 }
 
 SECTIONS
@@ -95,6 +107,24 @@ SECTIONS
     __heap_end_exclusive = .;
 
     ASSERT((. & PAGE_MASK) == 0, "Heap is not page aligned")
+
+    /***********************************************************************************************
+    * Secondary Core Stacks
+    *
+    * One reserved stack region per possible secondary core (up to MAX_SUPPORTED_CORES - 1). The
+    * boot core (core 0) continues to use the separate `.boot_core_stack` region below. Like `.bss`
+    * and `.heap` above, this section has no explicit `AT()`, so it inherits a valid, low physical
+    * load address (continuing the delta established by `.text`'s `AT()`), making it accessible via
+    * `ADR_REL` before the MMU is enabled, and via `ADR_ABS` (its virtual address) afterwards.
+    ***********************************************************************************************/
+    __secondary_core_stacks_start = .;
+    .secondary_core_stacks (NOLOAD) :
+    {
+        . += SECONDARY_CORE_STACK_SIZE * NUM_SECONDARY_CORES;
+    } :segment_secondary_core_stacks
+    __secondary_core_stacks_end_exclusive = .;
+
+    ASSERT((. & PAGE_MASK) == 0, "Secondary core stacks region is not page aligned")
 
     /***********************************************************************************************
     * MMIO Remap Reserved

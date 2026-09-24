@@ -4,7 +4,10 @@
 
 //! A panic handler that infinitely waits.
 
-use crate::{backtrace, cpu, exception, println};
+use crate::cpu;
+#[cfg(not(feature = "bsp_host"))]
+use crate::{backtrace, exception, println};
+#[cfg(not(feature = "bsp_host"))]
 use core::panic::PanicInfo;
 
 //--------------------------------------------------------------------------------------------------
@@ -43,7 +46,7 @@ fn _panic_exit() -> ! {
 fn panic_prevent_reenter() {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     compile_error!("Add the target_arch to above's check if the following code is safe to use");
 
     static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -57,6 +60,7 @@ fn panic_prevent_reenter() {
     _panic_exit()
 }
 
+#[cfg(not(feature = "bsp_host"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     exception::asynchronous::local_irq_mask();

@@ -74,6 +74,11 @@ impl StateManager {
         self.state() == State::Init
     }
 
+    /// Return if the kernel has transitioned to multi-core state.
+    pub fn is_multi_core_main(&self) -> bool {
+        self.state() == State::MultiCoreMain
+    }
+
     /// Transition from Init to SingleCoreMain.
     pub fn transition_to_single_core_main(&self) {
         if self
@@ -87,6 +92,22 @@ impl StateManager {
             .is_err()
         {
             panic!("transition_to_single_core_main() called while state != Init");
+        }
+    }
+
+    /// Transition from SingleCoreMain to MultiCoreMain.
+    pub fn transition_to_multi_core_main(&self) {
+        if self
+            .0
+            .compare_exchange(
+                Self::SINGLE_CORE_MAIN,
+                Self::MULTI_CORE_MAIN,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            panic!("transition_to_multi_core_main() called while state != SingleCoreMain");
         }
     }
 }

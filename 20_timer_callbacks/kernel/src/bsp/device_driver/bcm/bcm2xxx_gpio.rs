@@ -12,10 +12,10 @@ use crate::{
     synchronization,
     synchronization::IRQSafeNullLock,
 };
+#[cfg(any(feature = "bsp_rpi3", feature = "bsp_rpi4"))]
+use tock_registers::interfaces::Writeable;
 use tock_registers::{
-    interfaces::{ReadWriteable, Writeable},
-    register_bitfields, register_structs,
-    registers::ReadWrite,
+    interfaces::ReadWriteable, register_bitfields, register_structs, registers::ReadWrite,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -187,6 +187,10 @@ impl GPIOInner {
 
         #[cfg(feature = "bsp_rpi4")]
         self.disable_pud_14_15_bcm2711();
+
+        // TODO_VERIFY: RP1 (Pi 5) uses its own IO_BANK0/pad-control register layout,
+        // distinct from BCM2837/BCM2711. Pull-up/down disable for pins 14/15 is not
+        // yet implemented here — needs RP1 datasheet register definitions.
     }
 }
 

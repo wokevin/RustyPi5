@@ -8,6 +8,10 @@
 #[path = "_arch/aarch64/exception.rs"]
 mod arch_exception;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "_arch/x86_64/exception.rs"]
+mod arch_exception;
+
 pub mod asynchronous;
 
 //--------------------------------------------------------------------------------------------------

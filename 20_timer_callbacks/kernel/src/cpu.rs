@@ -8,6 +8,10 @@
 #[path = "_arch/aarch64/cpu.rs"]
 mod arch_cpu;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "_arch/x86_64/cpu.rs"]
+mod arch_cpu;
+
 mod boot;
 
 pub mod smp;

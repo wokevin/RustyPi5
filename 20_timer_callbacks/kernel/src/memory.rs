@@ -196,3 +196,4 @@ mod tests {
         assert_eq!(addr.offset_into_page(), 100);
     }
 }
+
