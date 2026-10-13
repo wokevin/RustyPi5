@@ -1,0 +1,24 @@
+# Normalize line endings for all text files, but let Git auto-detect text vs binary rather than
+# forcing everything through CRLF<->LF conversion (safer for any binary assets that might get
+# added later, e.g. VHDX/EFI images, which must never be touched by line-ending normalization).
+* text=auto
+
+# This codebase's existing source/script files are currently CRLF on disk (confirmed directly via
+# get_file reads throughout this session -- every .rs/.ps1/.ld file shows \r\n line endings).
+# Pinning these extensions to CRLF explicitly (rather than relying solely on `text=auto`'s
+# platform-guessing) ensures `git add`/`git commit` stop reporting "LF will be replaced by CRLF"
+# warnings and stop silently renormalizing files to LF on commit, which is what was causing the
+# line-ending mismatch issue when committing from Windows.
+*.rs      text eol=crlf
+*.ps1     text eol=crlf
+*.ld      text eol=crlf
+*.md      text eol=crlf
+*.toml    text eol=crlf
+*.yml     text eol=crlf
+*.yaml    text eol=crlf
+
+# Explicitly mark known binary assets so they are never touched by line-ending normalization,
+# regardless of `text=auto`'s guess.
+*.vhdx    binary
+*.efi     binary
+*.elf     binary
