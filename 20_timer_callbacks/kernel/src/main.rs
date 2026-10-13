@@ -10,6 +10,7 @@
 //! The `kernel` binary.
 
 #![feature(format_args_nl)]
+#![feature(abi_x86_interrupt)]
 #![cfg_attr(not(feature = "bsp_host"), no_main)]
 #![cfg_attr(not(feature = "bsp_host"), no_std)]
 

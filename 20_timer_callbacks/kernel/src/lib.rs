@@ -108,8 +108,10 @@
 //!     - It is implemented in `src/_arch/__arch_name__/cpu/boot.s`.
 //! 2. Once finished with architectural setup, the arch code calls `kernel_init()`.
 
+
 #![allow(clippy::upper_case_acronyms)]
 #![allow(incomplete_features)]
+#![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![feature(asm_const)]
 #![feature(const_option)]
@@ -126,8 +128,10 @@
 #![feature(unchecked_math)]
 #![cfg_attr(not(feature = "bsp_host"), no_std)]
 // Testing
-#![cfg_attr(test, no_main)]
+#![cfg_attr(all(test, not(feature = "bsp_host")), no_main)]
 #![feature(custom_test_frameworks)]
+#![reexport_test_harness_main = "test_main"]
+#![test_runner(crate::test_runner)]
 
 #[cfg(feature = "bsp_host")]
 extern crate std;
@@ -169,6 +173,13 @@ pub fn version() -> &'static str {
 
 /// The default runner for unit tests.
 pub fn test_runner(tests: &[&test_types::UnitTest]) {
+    #[cfg(feature = "bsp_host")]
+    unsafe {
+        exception::handling_init();
+        memory::init();
+        bsp::driver::qemu_bring_up_console();
+    }
+
     // This line will be printed as the test header.
     println!("Running {} tests", tests.len());
 
@@ -181,12 +192,18 @@ pub fn test_runner(tests: &[&test_types::UnitTest]) {
         // Failed tests call panic!(). Execution reaches here only if the test has passed.
         println!("[ok]")
     }
+
+    #[cfg(feature = "bsp_host")]
+    cpu::qemu_exit_success();
 }
 
 /// The `kernel_init()` for unit tests.
 #[cfg(test)]
 #[no_mangle]
 unsafe fn kernel_init() -> ! {
+    #[cfg(feature = "bsp_host")]
+    std::println!("DEBUG: kernel_init() entered");
+
     exception::handling_init();
     memory::init();
     bsp::driver::qemu_bring_up_console();
@@ -194,4 +211,11 @@ unsafe fn kernel_init() -> ! {
     test_main();
 
     cpu::qemu_exit_success()
+}
+
+/// Host entry point for unit tests.
+#[cfg(all(test, feature = "bsp_host"))]
+fn main() {
+    std::println!("DEBUG: main() entered");
+    unsafe { kernel_init() }
 }

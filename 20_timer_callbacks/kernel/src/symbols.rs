@@ -5,7 +5,9 @@
 //! Debug symbol support.
 
 use crate::memory::{Address, Virtual};
-use core::{cell::UnsafeCell, slice};
+#[cfg(not(feature = "bsp_host"))]
+use core::cell::UnsafeCell;
+use core::slice;
 use debug_symbol_types::Symbol;
 
 //--------------------------------------------------------------------------------------------------
@@ -13,6 +15,10 @@ use debug_symbol_types::Symbol;
 //--------------------------------------------------------------------------------------------------
 
 // Symbol from the linker script.
+//
+// Not available on hosted (`bsp_host`) builds, since there is no linker script patching in symbol
+// data for a normal std binary.
+#[cfg(not(feature = "bsp_host"))]
 extern "Rust" {
     static __kernel_symbols_start: UnsafeCell<()>;
 }
@@ -30,8 +36,15 @@ static NUM_KERNEL_SYMBOLS: u64 = 0;
 // Private Code
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(not(feature = "bsp_host"))]
 fn kernel_symbol_section_virt_start_addr() -> Address<Virtual> {
     Address::new(unsafe { __kernel_symbols_start.get() as usize })
+}
+
+/// On hosted builds there is no linker-patched symbol table, so this always resolves to null.
+#[cfg(feature = "bsp_host")]
+fn kernel_symbol_section_virt_start_addr() -> Address<Virtual> {
+    Address::new(0)
 }
 
 fn num_kernel_symbols() -> usize {
@@ -63,7 +76,7 @@ pub fn lookup_symbol(addr: Address<Virtual>) -> Option<&'static Symbol> {
 // Testing
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "bsp_host")))]
 mod tests {
     use super::*;
     use test_macros::kernel_test;

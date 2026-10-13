@@ -131,7 +131,7 @@ pub trait SmpReleaseMethod {
 /// The BSP is responsible for populating this with the correct topology/affinity values and for
 /// marking exactly one entry as the boot core.
 pub fn cores() -> &'static [Cpu] {
-    &bsp::cpu::CORES
+    bsp::cpu::cores()
 }
 
 /// Bring up every non-boot core known to this board.

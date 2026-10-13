@@ -34,4 +34,13 @@ pub mod driver {
 
         Ok(())
     }
+
+    /// Minimal console bring-up for unit tests.
+    ///
+    /// On host, the console is stdout and needs no MMIO setup, so this just registers it
+    /// directly, mirroring the Raspberry Pi BSP's `qemu_bring_up_console()`.
+    #[cfg(feature = "test_build")]
+    pub fn qemu_bring_up_console() {
+        crate::console::register_console(&super::console::HOST_CONSOLE);
+    }
 }

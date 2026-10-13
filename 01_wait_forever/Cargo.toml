@@ -9,8 +9,13 @@ lto = true
 
 [features]
 default = []
-bsp_rpi3 = []
-bsp_rpi4 = []
+debug_prints = []
+bsp_rpi3 = ["tock-registers"]
+bsp_rpi4 = ["tock-registers"]
+bsp_rpi5 = ["tock-registers"]
+bsp_host = []
+bsp_hyperv_x86 = []
+test_build = []
 
 [[bin]]
 name = "kernel"

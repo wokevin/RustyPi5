@@ -51,13 +51,27 @@ pub fn wait_forever() -> ! {
 //--------------------------------------------------------------------------------------------------
 
 /// Make the host process exit with failure status.
+///
+/// `std::process::exit()` does not flush stdio buffers on its own. When stdout isn't a TTY (e.g.
+/// piped through `cargo test`), it is fully block-buffered, so anything printed by the test
+/// runner would otherwise be silently lost. Flush explicitly first.
 #[cfg(feature = "test_build")]
 pub fn qemu_exit_failure() -> ! {
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    std::io::stderr().flush().ok();
+
     std::process::exit(1)
 }
 
 /// Make the host process exit with success status.
+///
+/// See the note on [`qemu_exit_failure`] regarding the explicit flush.
 #[cfg(feature = "test_build")]
 pub fn qemu_exit_success() -> ! {
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    std::io::stderr().flush().ok();
+
     std::process::exit(0)
 }

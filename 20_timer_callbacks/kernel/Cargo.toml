@@ -12,6 +12,7 @@ bsp_rpi4 = ["tock-registers"]
 bsp_rpi5 = ["tock-registers"]
 bsp_host = []
 bsp_hyperv_x86 = []
+test_build = []
 
 # When building for QEMU (raspi3b/raspi4b), secondary cores must be released via PSCI CPU_ON.
 # QEMU's emulated firmware implements PSCI, not the classic Raspberry Pi ROM spin-table mechanism
@@ -50,8 +51,6 @@ test = true
 
 # Disable unit tests for the kernel binary.
 [[bin]]
-name = "kernel"
+name = "RustyPi5"
 path = "src/main.rs"
 test = false
-
-# List of tests without harness.

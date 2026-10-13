@@ -3,6 +3,19 @@
 version = 3
 
 [[package]]
+name = "RustyPi5"
+version = "0.10.0"
+dependencies = [
+ "aarch64-cpu",
+ "debug-symbol-types",
+ "linked_list_allocator",
+ "qemu-exit",
+ "test-macros",
+ "test-types",
+ "tock-registers",
+]
+
+[[package]]
 name = "aarch64-cpu"
 version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -27,19 +40,6 @@ name = "linked_list_allocator"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e322f259d225fbae43a1b053b2dc6a5968a6bdf8b205f5de684dab485b95030e"
-
-[[package]]
-name = "mingo"
-version = "0.20.0"
-dependencies = [
- "aarch64-cpu",
- "debug-symbol-types",
- "linked_list_allocator",
- "qemu-exit",
- "test-macros",
- "test-types",
- "tock-registers",
-]
 
 [[package]]
 name = "proc-macro2"

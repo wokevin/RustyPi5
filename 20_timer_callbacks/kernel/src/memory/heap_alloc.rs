@@ -5,12 +5,14 @@
 //! Heap allocation.
 
 use crate::{
-    backtrace, bsp, common, debug, info,
+    backtrace, common, debug, info,
     memory::{Address, Virtual},
     synchronization,
     synchronization::IRQSafeNullLock,
     warn,
 };
+#[cfg(not(feature = "bsp_host"))]
+use crate::bsp;
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, Ordering};
 use linked_list_allocator::Heap as LinkedListHeap;
@@ -142,11 +144,26 @@ pub fn kernel_init_heap_allocator() {
         return;
     }
 
-    let region = bsp::memory::mmu::virt_heap_region();
+    #[cfg(feature = "bsp_host")]
+    {
+        // Host builds have no real linker-defined heap region; back the allocator with a real,
+        // actually-mapped buffer instead of the bare-metal placeholder addresses.
+        const HOST_HEAP_SIZE: usize = 1024 * 1024;
+        static mut HOST_HEAP: [u8; HOST_HEAP_SIZE] = [0; HOST_HEAP_SIZE];
 
-    KERNEL_HEAP_ALLOCATOR.inner.lock(|inner| unsafe {
-        inner.init(region.start_addr().as_usize() as *mut u8, region.size())
-    });
+        KERNEL_HEAP_ALLOCATOR.inner.lock(|inner| unsafe {
+            inner.init(HOST_HEAP.as_mut_ptr(), HOST_HEAP_SIZE)
+        });
+    }
+
+    #[cfg(not(feature = "bsp_host"))]
+    {
+        let region = bsp::memory::mmu::virt_heap_region();
+
+        KERNEL_HEAP_ALLOCATOR.inner.lock(|inner| unsafe {
+            inner.init(region.start_addr().as_usize() as *mut u8, region.size())
+        });
+    }
 
     INIT_DONE.store(true, Ordering::Relaxed);
 }

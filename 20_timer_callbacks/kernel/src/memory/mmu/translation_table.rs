@@ -83,7 +83,7 @@ pub mod interface {
 // Testing
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 mod tests {
     use super::*;
     use crate::memory::mmu::{AccessPermissions, MemAttributes, PageAddress};

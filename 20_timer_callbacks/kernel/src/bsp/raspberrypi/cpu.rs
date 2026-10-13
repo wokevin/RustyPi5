@@ -57,6 +57,11 @@ pub static CORES: [Cpu; MAX_SUPPORTED_CORES] = [
     Cpu::new(CpuId::new(7), false),
 ];
 
+/// Return the board's core table (boot core included).
+pub fn cores() -> &'static [Cpu] {
+    &CORES
+}
+
 //--------------------------------------------------------------------------------------------------
 // Private Definitions
 //--------------------------------------------------------------------------------------------------

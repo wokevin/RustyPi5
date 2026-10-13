@@ -14,9 +14,14 @@
 //!
 //! - No BSS zeroing yet (needed once the kernel has `.bss`-based statics, e.g. the allocator).
 //! - No stack setup yet — currently assumes the shim leaves us on a usable stack.
-//! - `kernel_init()` is called directly; secondary-core bring-up is not wired up for x86_64 yet.
+
+use core::arch::asm;
 
 /// The Rust entry point, called from the shim after `ExitBootServices()`.
+///
+/// `rsdp_addr` is the physical address of the ACPI RSDP, as discovered by the shim while UEFI
+/// boot services were still active (post-`ExitBootServices()`, walking the UEFI configuration
+/// table is no longer possible). A value of `0` means the shim could not find it.
 ///
 /// # Safety
 ///
@@ -24,10 +29,60 @@
 /// - No environment setup (stack, BSS, paging) is guaranteed correct yet; this is a bring-up
 ///   skeleton only.
 #[no_mangle]
-pub unsafe extern "sysv64" fn _start() -> ! {
-	extern "Rust" {
-		fn kernel_init() -> !;
+pub unsafe extern "sysv64" fn _start(_rsdp_addr: usize) -> ! {
+	// TEMPORARY bisection probe: halt immediately on entry, touching absolutely nothing else
+	// (no GDT/IDT/console/kernel_init/ACPI), to determine whether the shim-to-kernel handoff
+	// itself (stack switch + jump via the shim's `asm!` block) is clean on this Hyper-V
+	// configuration, independent of anything the kernel subsystems do afterward. If the VM
+	// stays `Running` after this, the handoff is confirmed clean and the fault is somewhere in
+	// `kernel_init()` / `bsp::driver::init()` (most likely `cpu::discover_cores()`'s ACPI/APIC
+	// code, which hasn't been exercised yet). If it still resets immediately, the fault is in
+	// the handoff itself (bad entry address, bad stack, or an architectural state UEFI left
+	// that long mode can't tolerate).
+	//
+	// `cli` first: after ExitBootServices(), UEFI's own IDT is no longer a trustworthy target
+	// for interrupt delivery in this kernel's context (we haven't installed our own yet). If any
+	// interrupt arrives while sitting on `hlt` with no valid/matching IDT, the CPU can't even
+	// deliver a clean #GP/#NP for it, let alone a #DF -- it escalates straight to a triple fault,
+	// indistinguishable from a bad handoff. Masking interrupts first rules this out as a cause.
+	//
+	// Remove once bisection is complete.
+	loop {
+		asm!("cli", "hlt", options(nomem, nostack));
 	}
 
-	kernel_init()
+	#[allow(unreachable_code)]
+	{
+		extern "Rust" {
+			fn kernel_init() -> !;
+		}
+
+		crate::bsp::acpi::set_rsdp_addr(_rsdp_addr);
+
+		kernel_init()
+	}
+}
+
+/// Secondary-core entry point.
+///
+/// Unlike the AArch64 path (`_start_secondary` in `boot.s`), this needs no EL-check, BSS zeroing,
+/// or MMU-enable step: by the time `bsp::hyperv_x86::trampoline`'s real-mode code reaches this
+/// point, the AP is already running in 64-bit long mode, using the boot core's page tables and
+/// GDT, with `RSP` already pointing at this core's reserved stack (all set up directly by the
+/// trampoline — see its `lm_entry` — since there is no equivalent of AArch64's post-PSCI/spin-table
+/// "MMU-disabled" intermediate state on x86_64's INIT-SIPI-SIPI mechanism once the trampoline has
+/// done its job).
+///
+/// # Safety
+///
+/// - Must only ever be reached via `bsp::hyperv_x86::trampoline`'s real-mode code, immediately
+///   after a secondary core has been released via INIT-SIPI-SIPI.
+/// - `RSP` must already be valid (set by the trampoline) before this is reached.
+#[no_mangle]
+pub unsafe extern "sysv64" fn _start_secondary() -> ! {
+	extern "Rust" {
+		fn kernel_init_secondary() -> !;
+	}
+
+	kernel_init_secondary()
 }

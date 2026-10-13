@@ -31,6 +31,7 @@ fn _panic_exit() -> ! {
     }
 }
 
+#[cfg(not(feature = "bsp_host"))]
 /// Stop immediately if called a second time.
 ///
 /// # Note

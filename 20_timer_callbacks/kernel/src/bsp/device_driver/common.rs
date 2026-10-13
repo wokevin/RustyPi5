@@ -4,6 +4,8 @@
 
 //! Common device driver code.
 
+#![allow(dead_code)]
+
 use crate::memory::{Address, Virtual};
 use core::{fmt, marker::PhantomData, ops};
 

@@ -40,7 +40,12 @@ pub static CORES: [Cpu; 1] = [Cpu::new(CpuId::new(0), true)];
 // Public Code
 //--------------------------------------------------------------------------------------------------
 
+/// Return the board's core table (boot core included).
+pub fn cores() -> &'static [Cpu] {
+    &CORES
+}
+
 /// Return this board's secondary-core release mechanism.
 pub fn smp_release_method() -> &'static dyn SmpReleaseMethod {
-	&HOST_SMP_RELEASE
+    &HOST_SMP_RELEASE
 }
