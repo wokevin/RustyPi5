@@ -23,34 +23,18 @@ use core::arch::asm;
 /// boot services were still active (post-`ExitBootServices()`, walking the UEFI configuration
 /// table is no longer possible). A value of `0` means the shim could not find it.
 ///
+/// `framebuffer_info_addr` is the physical address of a `bsp::video::FramebufferInfo` populated
+/// by the shim via GOP, also while boot services were still active. A `base` field of `0` inside
+/// it means no GOP framebuffer was found/supported; the kernel must check that before treating
+/// any other field in it as valid.
+///
 /// # Safety
 ///
 /// - Must only be called once, by the shim, on the boot core.
 /// - No environment setup (stack, BSS, paging) is guaranteed correct yet; this is a bring-up
 ///   skeleton only.
 #[no_mangle]
-pub unsafe extern "sysv64" fn _start(_rsdp_addr: usize) -> ! {
-	// TEMPORARY bisection probe: halt immediately on entry, touching absolutely nothing else
-	// (no GDT/IDT/console/kernel_init/ACPI), to determine whether the shim-to-kernel handoff
-	// itself (stack switch + jump via the shim's `asm!` block) is clean on this Hyper-V
-	// configuration, independent of anything the kernel subsystems do afterward. If the VM
-	// stays `Running` after this, the handoff is confirmed clean and the fault is somewhere in
-	// `kernel_init()` / `bsp::driver::init()` (most likely `cpu::discover_cores()`'s ACPI/APIC
-	// code, which hasn't been exercised yet). If it still resets immediately, the fault is in
-	// the handoff itself (bad entry address, bad stack, or an architectural state UEFI left
-	// that long mode can't tolerate).
-	//
-	// `cli` first: after ExitBootServices(), UEFI's own IDT is no longer a trustworthy target
-	// for interrupt delivery in this kernel's context (we haven't installed our own yet). If any
-	// interrupt arrives while sitting on `hlt` with no valid/matching IDT, the CPU can't even
-	// deliver a clean #GP/#NP for it, let alone a #DF -- it escalates straight to a triple fault,
-	// indistinguishable from a bad handoff. Masking interrupts first rules this out as a cause.
-	//
-	// Remove once bisection is complete.
-	loop {
-		asm!("cli", "hlt", options(nomem, nostack));
-	}
-
+pub unsafe extern "sysv64" fn _start(_rsdp_addr: usize, _framebuffer_info_addr: usize) -> ! {
 	#[allow(unreachable_code)]
 	{
 		extern "Rust" {
@@ -58,6 +42,7 @@ pub unsafe extern "sysv64" fn _start(_rsdp_addr: usize) -> ! {
 		}
 
 		crate::bsp::acpi::set_rsdp_addr(_rsdp_addr);
+		crate::bsp::video::set_framebuffer_info_addr(_framebuffer_info_addr);
 
 		kernel_init()
 	}

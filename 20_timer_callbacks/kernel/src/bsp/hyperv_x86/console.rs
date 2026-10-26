@@ -24,9 +24,24 @@
 //! - Implement a real output path once one is confirmed not to fault on this Hyper-V
 //!   configuration (candidates: a paravirtualized/synthetic console device, or framebuffer text
 //!   output via the UEFI GOP handed off before `ExitBootServices()`).
+//!
+//! With the `qemu` feature, output is mirrored to QEMU's emulated 16550 COM1 and a
+//! scrolling GOP framebuffer text console instead of the Hyper-V stub.
 
 use crate::{console::interface, synchronization::IRQSafeNullLock};
 use core::fmt;
+
+#[cfg(feature = "qemu")]
+unsafe fn read_port(port: u16) -> u8 {
+    let value: u8;
+    core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    value
+}
+
+#[cfg(feature = "qemu")]
+unsafe fn write_port(port: u16, value: u8) {
+    core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+}
 
 //--------------------------------------------------------------------------------------------------
 // Private Definitions
@@ -35,6 +50,8 @@ use core::fmt;
 /// Inner, lock-protected UART state.
 struct UartInner {
     chars_written: usize,
+    #[cfg(feature = "qemu")]
+    screen: Option<super::video::TextConsole>,
 }
 
 /// Representation of the UART.
@@ -48,14 +65,43 @@ pub struct Uart {
 
 impl UartInner {
     const fn new() -> Self {
-        Self { chars_written: 0 }
+        Self {
+            chars_written: 0,
+            #[cfg(feature = "qemu")]
+            screen: None,
+        }
     }
 
-    /// No-op: see module-level docs. Intentionally does not touch any I/O port.
-    fn init(&mut self) {}
+    fn init(&mut self) -> Result<(), &'static str> {
+        #[cfg(feature = "qemu")]
+        {
+            unsafe {
+                write_port(0x3F9, 0x00);
+                write_port(0x3FB, 0x80);
+                write_port(0x3F8, 0x01);
+                write_port(0x3F9, 0x00);
+                write_port(0x3FB, 0x03);
+                write_port(0x3FA, 0xC7);
+                write_port(0x3FC, 0x0B);
+            }
+            self.screen = Some(super::video::TextConsole::new()?);
+        }
+        Ok(())
+    }
 
-    /// No-op: see module-level docs. Intentionally does not touch any I/O port.
     fn write_byte(&mut self, _byte: u8) {
+        #[cfg(feature = "qemu")]
+        {
+            unsafe {
+                while read_port(0x3FD) & 0x20 == 0 {
+                    core::hint::spin_loop();
+                }
+                write_port(0x3F8, _byte);
+            }
+            if let Some(screen) = self.screen.as_mut() {
+                screen.write_byte(_byte);
+            }
+        }
         self.chars_written += 1;
     }
 }
@@ -92,11 +138,12 @@ impl Uart {
         }
     }
 
-    /// Bring up the UART hardware. Must be called once before first use.
-    pub fn init(&self) {
+    /// Bring up the UART and optional framebuffer. Must be called once before first use.
+    /// A framebuffer error leaves the serial output path available.
+    pub fn init(&self) -> Result<(), &'static str> {
         use crate::synchronization::interface::Mutex;
 
-        self.inner.lock(|inner| inner.init());
+        self.inner.lock(|inner| inner.init())
     }
 }
 
@@ -129,7 +176,12 @@ impl interface::Write for Uart {
     }
 
     fn flush(&self) {
-        // No-op driver: nothing is ever actually in flight.
+        #[cfg(feature = "qemu")]
+        unsafe {
+            while read_port(0x3FD) & 0x40 == 0 {
+                core::hint::spin_loop();
+            }
+        }
     }
 }
 

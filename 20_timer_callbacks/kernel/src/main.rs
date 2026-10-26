@@ -242,6 +242,9 @@ fn kernel_main() -> ! {
     time::time_manager()
         .set_timeout_periodic(Duration::from_secs(1), Box::new(|| info!("Periodic 1 sec")));
 
+    #[cfg(all(feature = "bsp_hyperv_x86", feature = "qemu"))]
+    info!("Boot complete. CPU idle; no shell or network driver yet.");
+    #[cfg(not(all(feature = "bsp_hyperv_x86", feature = "qemu")))]
     info!("Echoing input now");
     cpu::wait_forever();
 }

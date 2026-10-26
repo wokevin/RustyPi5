@@ -87,6 +87,66 @@ fn shim_print(msg: &str) {
     }
 }
 
+/// Converts a byte slice to hex digits into `out`, returning the number of hex characters
+/// written (always `bytes_written * 2`, no leading `0x`). Used by `shim_print_hex` /
+/// `shim_print_label_hex` / `shim_print_symbolicated` to build a one-line
+/// `<label><hex><suffix>` message without needing a heap/`core::fmt` formatter in this `no_std`
+/// shim.
+fn write_hex(mut value: u64, out: &mut [u8]) -> usize {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut tmp = [0u8; 16];
+    let mut n = 0;
+    if value == 0 {
+        tmp[0] = b'0';
+        n = 1;
+    } else {
+        while value != 0 {
+            tmp[n] = DIGITS[(value & 0xF) as usize];
+            value >>= 4;
+            n += 1;
+        }
+    }
+    for i in 0..n {
+        out[i] = tmp[n - 1 - i];
+    }
+    n
+}
+
+/// Prints `"{label}{value:#x}{suffix}"` in one line via `shim_print`.
+fn shim_print_hex(label: &str, value: u64, suffix: &str) {
+    let mut buf = [0u8; 256];
+    let mut pos = 0;
+    for b in label.bytes() {
+        buf[pos] = b;
+        pos += 1;
+    }
+    buf[pos] = b'0';
+    buf[pos + 1] = b'x';
+    pos += 2;
+    let mut hex_buf = [0u8; 16];
+    let n = write_hex(value, &mut hex_buf);
+    buf[pos..pos + n].copy_from_slice(&hex_buf[..n]);
+    pos += n;
+    for b in suffix.bytes() {
+        buf[pos] = b;
+        pos += 1;
+    }
+    // SAFETY: buf only ever contains ASCII bytes written above.
+    let s = unsafe { core::str::from_utf8_unchecked(&buf[..pos]) };
+    shim_print(s);
+}
+
+/// Alias kept for call sites that label a raw (non-symbol) address; identical to `shim_print_hex`.
+fn shim_print_label_hex(label: &str, value: u64, suffix: &str) {
+    shim_print_hex(label, value, suffix);
+}
+
+/// Alias kept for call sites symbolicating a function/entry address; identical to
+/// `shim_print_hex`, since this freestanding shim has no symbol table to resolve names from.
+fn shim_print_symbolicated(label: &str, value: usize) {
+    shim_print_hex(label, value as u64, "");
+}
+
 /// Locates `EFI_SERIAL_IO_PROTOCOL` (best-effort) and caches `ConOut` from the system table
 /// (always present). Must be called once, early in `efi_main`, before any `shim_print` call.
 ///
@@ -129,9 +189,22 @@ const LOADED_IMAGE_PROTOCOL_GUID: Guid = Guid {
     data4: [0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
 };
 
+/// EFI_GRAPHICS_OUTPUT_PROTOCOL GUID: `{9042A9DE-23DC-4A38-96FB-7ADED080516A}`.
+///
+/// Queried via `locate_protocol` (not `handle_protocol`): GOP is a boot-services-only protocol
+/// typically installed on the firmware's own console output handle, not on the loaded image or
+/// file system handles this shim already has, so a global search is the correct way to find it.
+const GRAPHICS_OUTPUT_PROTOCOL_GUID: Guid = Guid {
+    data1: 0x9042_a9de,
+    data2: 0x23dc,
+    data3: 0x4a38,
+    data4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
+};
+
 const EFI_SUCCESS: usize = 0;
 const EFI_FILE_MODE_READ: u64 = 0x0000_0000_0000_0001;
 const EFI_ALLOCATE_ANY_PAGES: u32 = 0;
+const EFI_ALLOCATE_ADDRESS: u32 = 2;
 const EFI_LOADER_DATA: u32 = 2;
 
 /// Kernel binary path relative to the ESP root, mirroring `BOOTX64.EFI`'s own `\EFI\BOOT` layout.
@@ -172,6 +245,25 @@ struct TableHeader {
     _header_size: u32,
     _crc32: u32,
     _reserved: u32,
+}
+
+/// Minimal `EFI_SYSTEM_TABLE` prefix, just enough to reach `ConOut`, `BootServices`, and the
+/// configuration table (needed to find the ACPI RSDP).
+#[repr(C)]
+struct SystemTable {
+    _header: TableHeader,
+    _firmware_vendor: usize,
+    _firmware_revision: u32,
+    _console_in_handle: usize,
+    _con_in: usize,
+    _console_out_handle: usize,
+    con_out: *mut SimpleTextOutputProtocol,
+    _standard_error_handle: usize,
+    _std_err: usize,
+    _runtime_services: usize,
+    boot_services: *mut BootServices,
+    number_of_table_entries: usize,
+    configuration_table: *mut ConfigurationTable,
 }
 
 /// Minimal `EFI_BOOT_SERVICES` prefix, just enough to reach the handful of services we need.
@@ -231,7 +323,7 @@ struct BootServices {
     exit_boot_services:
         unsafe extern "efiapi" fn(image_handle: *mut c_void, map_key: usize) -> usize,
     _get_next_monotonic_count: usize,
-    _stall: usize,
+    stall: unsafe extern "efiapi" fn(microseconds: usize) -> usize,
     _set_watchdog_timer: usize,
     _connect_controller: usize,
     _disconnect_controller: usize,
@@ -317,38 +409,256 @@ struct LoadedImageProtocol {
     // remaining fields unused.
 }
 
-/// Minimal prefix of `EFI_SYSTEM_TABLE`, just enough to reach `boot_services` and the
-/// configuration table.
+/// `EFI_GRAPHICS_OUTPUT_MODE_INFORMATION`, per the UEFI spec. Only the fields needed to compute a
+/// pixel's byte offset in the framebuffer are kept; `pixel_format`/`pixel_bitmask` are omitted
+/// since this driver only supports the common 32-bit BGR/RGB pixel formats (format 0 or 1),
+/// checked by the caller before trusting `pixels_per_scan_line`.
+#[repr(C)]
+struct GraphicsOutputModeInformation {
+    _version: u32,
+    horizontal_resolution: u32,
+    vertical_resolution: u32,
+    pixel_format: u32,
+    _pixel_information: [u32; 4],
+    pixels_per_scan_line: u32,
+}
+
+/// `EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE`, per the UEFI spec.
+#[repr(C)]
+struct GraphicsOutputProtocolMode {
+    _max_mode: u32,
+    _mode: u32,
+    info: *const GraphicsOutputModeInformation,
+    _size_of_info: usize,
+    frame_buffer_base: u64,
+    frame_buffer_size: usize,
+}
+
+/// Minimal `EFI_GRAPHICS_OUTPUT_PROTOCOL` prefix, just enough to reach `mode` (the other two
+/// function-pointer fields, `QueryMode`/`SetMode`, are unused: the firmware's console-selected
+/// mode is accepted as-is rather than negotiating a different one).
+#[repr(C)]
+struct GraphicsOutputProtocol {
+    _query_mode: usize,
+    _set_mode: usize,
+    _blt: usize,
+    mode: *const GraphicsOutputProtocolMode,
+}
+
+/// Framebuffer info handed off to the kernel, mirroring what the kernel-side driver needs to plot
+/// pixels: a linear, firmware-mapped (identity-mapped at this stage, like everything else before
+/// the kernel builds its own page tables) base address, its stride in pixels (which can exceed
+/// `width` -- e.g. padded for alignment -- so must never be assumed equal to `width`), the
+/// visible resolution, and the GOP-reported total framebuffer size in bytes. `frame_buffer_size`
+/// is the authoritative bound on how much of `base` is actually mapped: `pixels_per_scan_line *
+/// height` can exceed it (observed under some Hyper-V synthetic GOP implementations), and writing
+/// past it faults with no IDT/GDT set up yet, which escalates straight to a triple fault/reset --
+/// so any raw framebuffer write (including the diagnostic fills in `efi_main`) must clamp its
+/// pixel count against this field, not just `pixels_per_scan_line * height`. `base` is `0` if no
+/// GOP framebuffer could be found, which the kernel must check before using any other field.
+#[repr(C)]
+pub struct FramebufferInfo {
+    pub base: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pixels_per_scan_line: u32,
+    pub bgr: bool,
+    pub frame_buffer_size: usize,
+}
+
+/// Locates `EFI_GRAPHICS_OUTPUT_PROTOCOL` (if present) and reads out its currently active mode's
+/// framebuffer base/stride/resolution/size. Returns `None` (not a hard failure) if GOP isn't
+/// available at all, or if its pixel format isn't one of the two common 32-bit-per-pixel formats
+/// this minimal driver supports (`PixelRedGreenBlueReserved8BitPerColor` = 0,
+/// `PixelBlueGreenRedReserved8BitPerColor` = 1) -- video output is a nice-to-have at this stage,
+/// not something that should block booting if e.g. only a text-mode-only/non-GOP console is
+/// present.
 ///
 /// # Safety
 ///
-/// This layout must exactly match the UEFI spec's `EFI_SYSTEM_TABLE` layout up through
-/// `configuration_table`; any drift will read garbage.
-#[repr(C)]
-struct SystemTable {
-    _header: [u8; 24], // EFI_TABLE_HEADER
-    _firmware_vendor: usize,
-    _firmware_revision: u32,
-    _padding: u32, // alignment for the next pointer field on x86_64
-    _console_in_handle: usize,
-    _con_in: usize,
-    _console_out_handle: usize,
-    con_out: *mut c_void,
-    _standard_error_handle: usize,
-    _std_err: usize,
-    _runtime_services: usize,
-    boot_services: *mut BootServices,
-    number_of_table_entries: usize,
-    configuration_table: *const ConfigurationTable,
+/// - Must be called while boot services are still active (uses `locate_protocol`).
+unsafe fn locate_gop_framebuffer(boot_services: *mut BootServices) -> Option<FramebufferInfo> {
+    let bs = &*boot_services;
+
+    let mut interface: *mut c_void = ptr::null_mut();
+    let status =
+        (bs.locate_protocol)(&GRAPHICS_OUTPUT_PROTOCOL_GUID, ptr::null_mut(), &mut interface);
+    if status != EFI_SUCCESS || interface.is_null() {
+        shim_print("[shim] GOP not found, skipping framebuffer handoff");
+        return None;
+    }
+
+    let gop = &*(interface as *const GraphicsOutputProtocol);
+    if gop.mode.is_null() {
+        return None;
+    }
+    let mode = &*gop.mode;
+    if mode.info.is_null() || mode.frame_buffer_base == 0 {
+        return None;
+    }
+    let info = &*mode.info;
+
+    const PIXEL_RGB: u32 = 0;
+    const PIXEL_BGR: u32 = 1;
+    let bgr = match info.pixel_format {
+        PIXEL_RGB => false,
+        PIXEL_BGR => true,
+        _ => {
+            shim_print("[shim] GOP pixel format unsupported (not 32bpp RGB/BGR), skipping");
+            return None;
+        }
+    };
+
+    shim_print_label_hex("[shim] GOP framebuffer@", mode.frame_buffer_base, "");
+    shim_print_label_hex("[shim] GOP framebuffer_size=", mode.frame_buffer_size as u64, "");
+    Some(FramebufferInfo {
+        base: mode.frame_buffer_base,
+        width: info.horizontal_resolution,
+        height: info.vertical_resolution,
+        pixels_per_scan_line: info.pixels_per_scan_line,
+        bgr,
+        frame_buffer_size: mode.frame_buffer_size,
+    })
 }
 
-/// Minimal ELF64 header, just enough to find the program header table and entry point.
+/// `EFI_MEMORY_DESCRIPTOR`, per the UEFI spec. `physical_end` is *not* a real UEFI field (the spec
+/// only gives `number_of_pages`); it's computed on read-out below so call sites can keep using a
+/// simple `end - start` without re-deriving it everywhere.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MemoryDescriptor {
+    typ: u32,
+    _pad: u32,
+    physical_start: u64,
+    _virtual_start: u64,
+    number_of_pages: u64,
+    _attribute: u64,
+}
+
+impl MemoryDescriptor {
+    fn physical_end(&self) -> u64 {
+        self.physical_start + self.number_of_pages * 4096
+    }
+}
+
+/// Finds the ACPI 2.0 RSDP in the UEFI configuration table. Must be called while boot services
+/// are still active (walking `configuration_table` afterward is unsupported by the spec).
+///
+/// # Safety
+///
+/// - `system_table` must point to a valid, currently-active `EFI_SYSTEM_TABLE`.
+unsafe fn find_acpi_rsdp(system_table: *const SystemTable) -> Option<usize> {
+    let system_table_ref = &*system_table;
+    let entries = core::slice::from_raw_parts(
+        system_table_ref.configuration_table,
+        system_table_ref.number_of_table_entries,
+    );
+    for entry in entries {
+        if entry.vendor_guid == ACPI_20_TABLE_GUID {
+            return Some(entry.vendor_table as usize);
+        }
+    }
+    None
+}
+
+/// Loads `\EFI\BOOT\KERNEL.ELF` from the same volume this shim itself was loaded from, into a
+/// freshly `allocate_pool`'d buffer. Returns `(data_ptr, size)` on success.
+///
+/// # Safety
+///
+/// - `image_handle` must be this shim's own image handle, as passed in to `efi_main`.
+/// - `boot_services` must point to a valid, currently-active `EFI_BOOT_SERVICES`.
+unsafe fn load_kernel_elf(
+    image_handle: *mut c_void,
+    boot_services: *mut BootServices,
+) -> Option<(*mut u8, usize)> {
+    let bs = &*boot_services;
+
+    let mut loaded_image_interface: *mut c_void = ptr::null_mut();
+    let status = (bs.handle_protocol)(
+        image_handle,
+        &LOADED_IMAGE_PROTOCOL_GUID,
+        &mut loaded_image_interface,
+    );
+    if status != EFI_SUCCESS || loaded_image_interface.is_null() {
+        shim_print("[shim] handle_protocol(LoadedImage) FAILED");
+        return None;
+    }
+    let loaded_image = &*(loaded_image_interface as *const LoadedImageProtocol);
+
+    let mut fs_interface: *mut c_void = ptr::null_mut();
+    let status = (bs.handle_protocol)(
+        loaded_image.device_handle,
+        &SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
+        &mut fs_interface,
+    );
+    if status != EFI_SUCCESS || fs_interface.is_null() {
+        shim_print("[shim] handle_protocol(SimpleFileSystem) FAILED");
+        return None;
+    }
+    let fs = &*(fs_interface as *const SimpleFileSystemProtocol);
+
+    let mut root: *mut FileProtocol = ptr::null_mut();
+    let status = (fs.open_volume)(fs_interface as *mut SimpleFileSystemProtocol, &mut root);
+    if status != EFI_SUCCESS || root.is_null() {
+        shim_print("[shim] open_volume FAILED");
+        return None;
+    }
+
+    let mut kernel_file: *mut FileProtocol = ptr::null_mut();
+    let status = ((&*root).open)(
+        root,
+        &mut kernel_file,
+        KERNEL_PATH_UTF16.as_ptr(),
+        EFI_FILE_MODE_READ,
+        0,
+    );
+    if status != EFI_SUCCESS || kernel_file.is_null() {
+        shim_print("[shim] open(KERNEL.ELF) FAILED");
+        return None;
+    }
+    let kernel_file_ref = &*kernel_file;
+
+    // Query file size via EFI_FILE_INFO.
+    let mut info_buffer_size: usize = size_of::<FileInfo>() + 64;
+    let mut info_buffer: *mut c_void = ptr::null_mut();
+    (bs.allocate_pool)(EFI_LOADER_DATA, info_buffer_size, &mut info_buffer);
+    let status = (kernel_file_ref.get_info)(
+        kernel_file,
+        &FILE_INFO_GUID,
+        &mut info_buffer_size,
+        info_buffer,
+    );
+    if status != EFI_SUCCESS {
+        shim_print("[shim] get_info(KERNEL.ELF) FAILED");
+        return None;
+    }
+    let file_size = (&*(info_buffer as *const FileInfo)).file_size as usize;
+
+    let mut data_buffer: *mut c_void = ptr::null_mut();
+    let status = (bs.allocate_pool)(EFI_LOADER_DATA, file_size, &mut data_buffer);
+    if status != EFI_SUCCESS || data_buffer.is_null() {
+        shim_print("[shim] allocate_pool(kernel image) FAILED");
+        return None;
+    }
+
+    let mut read_size = file_size;
+    let status = (kernel_file_ref.read)(kernel_file, &mut read_size, data_buffer);
+    if status != EFI_SUCCESS || read_size != file_size {
+        shim_print("[shim] read(KERNEL.ELF) FAILED");
+        return None;
+    }
+
+    Some((data_buffer as *mut u8, file_size))
+}
+
+/// Minimal ELF64 header prefix, just enough to find the program header table and entry point.
 #[repr(C)]
 struct Elf64Header {
     e_ident: [u8; 16],
-    e_type: u16,
-    e_machine: u16,
-    e_version: u32,
+    _e_type: u16,
+    _e_machine: u16,
+    _e_version: u32,
     e_entry: u64,
     e_phoff: u64,
     _e_shoff: u64,
@@ -359,7 +669,7 @@ struct Elf64Header {
     // remaining fields unused.
 }
 
-/// Minimal ELF64 program header, just enough to load `PT_LOAD` segments.
+/// `Elf64_Phdr`, just the fields needed to load `PT_LOAD` segments.
 #[repr(C)]
 struct Elf64ProgramHeader {
     p_type: u32,
@@ -373,234 +683,66 @@ struct Elf64ProgramHeader {
 }
 
 const PT_LOAD: u32 = 1;
+const EFI_PAGE_SIZE: usize = 4096;
 
-/// Walk the UEFI configuration table looking for the ACPI 2.0 RSDP.
+/// A merged, page-aligned run of one or more overlapping/adjacent `PT_LOAD` segments, allocated
+/// and copied as a single unit so segments that share a page (common when segments are packed
+/// tightly by the linker) don't each try to `AllocateAddress` the same page out from under each
+/// other.
+struct Cluster {
+    page_start: u64,
+    page_count: u64,
+}
+
+/// Parses the ELF64 program header table in `elf_data`, merges `PT_LOAD` segments into
+/// page-aligned clusters, allocates each cluster at its fixed physical address (identity-mapped,
+/// matching the linker script), copies each segment's file contents into place (zero-filling the
+/// `p_memsz - p_filesz` BSS tail), and returns the ELF entry point.
 ///
 /// # Safety
 ///
-/// - `system_table` must point to a valid, currently-active `EFI_SYSTEM_TABLE`.
-unsafe fn find_acpi_rsdp(system_table: *const SystemTable) -> Option<usize> {
-    let system_table = &*system_table;
-
-    for i in 0..system_table.number_of_table_entries {
-        let entry = &*system_table.configuration_table.add(i);
-
-        if entry.vendor_guid == ACPI_20_TABLE_GUID {
-            return Some(entry.vendor_table as usize);
-        }
-    }
-
-    None
-}
-
-/// Formats a small ASCII label plus a numeric EFI status code and prints it via `shim_print`,
-/// e.g. `[shim] open_volume status=0x800000000000000e`. Used to pinpoint exactly which UEFI call
-/// inside `load_kernel_elf` is failing, since a bare `None` gives no diagnostic information.
-fn shim_print_status(label: &str, status: usize) {
-    let mut buf = [0u8; 64];
-    let mut i = 0;
-    for b in label.bytes() {
-        if i >= buf.len() {
-            break;
-        }
-        buf[i] = b;
-        i += 1;
-    }
-    for b in b" status=0x" {
-        if i >= buf.len() {
-            break;
-        }
-        buf[i] = *b;
-        i += 1;
-    }
-    let hex = b"0123456789abcdef";
-    for shift in (0..16).rev() {
-        if i >= buf.len() {
-            break;
-        }
-        let nibble = ((status >> (shift * 4)) & 0xF) as usize;
-        buf[i] = hex[nibble];
-        i += 1;
-    }
-    shim_print(unsafe { core::str::from_utf8_unchecked(&buf[..i]) });
-}
-
-/// Opens `\EFI\BOOT\KERNEL.ELF` on the same volume the shim itself was loaded from, and reads its
-/// full contents into a freshly `AllocatePool`-allocated buffer.
-///
-/// # Safety
-///
-/// - `image_handle` / `system_table` must be the values handed to `efi_main`.
-/// - Must be called while boot services are still active.
-unsafe fn load_kernel_elf(
-    image_handle: *mut c_void,
-    boot_services: *mut BootServices,
-) -> Option<(*mut u8, usize)> {
-    let bs = &*boot_services;
-
-    // EFI_LOADED_IMAGE_PROTOCOL -> device_handle, so we open the file system on the same volume
-    // the shim was booted from instead of assuming a hardcoded handle.
-    let mut loaded_image: *mut c_void = ptr::null_mut();
-    let status = (bs.handle_protocol)(
-        image_handle,
-        &LOADED_IMAGE_PROTOCOL_GUID,
-        &mut loaded_image,
-    );
-    shim_print_status("[shim] handle_protocol(LOADED_IMAGE)", status);
-    if status != EFI_SUCCESS || loaded_image.is_null() {
-        return None;
-    }
-    let device_handle = (&*(loaded_image as *const LoadedImageProtocol)).device_handle;
-
-    let mut fs_protocol: *mut c_void = ptr::null_mut();
-    let status = (bs.handle_protocol)(
-        device_handle,
-        &SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
-        &mut fs_protocol,
-    );
-    shim_print_status("[shim] handle_protocol(SIMPLE_FILE_SYSTEM)", status);
-    if status != EFI_SUCCESS || fs_protocol.is_null() {
-        return None;
-    }
-    let fs_protocol = fs_protocol as *mut SimpleFileSystemProtocol;
-
-    let mut root: *mut FileProtocol = ptr::null_mut();
-    let status = ((&*fs_protocol).open_volume)(fs_protocol, &mut root);
-    shim_print_status("[shim] open_volume", status);
-    if status != EFI_SUCCESS || root.is_null() {
-        return None;
-    }
-
-    let mut kernel_file: *mut FileProtocol = ptr::null_mut();
-    let status = ((&*root).open)(
-        root,
-        &mut kernel_file,
-        KERNEL_PATH_UTF16.as_ptr(),
-        EFI_FILE_MODE_READ,
-        0,
-    );
-    shim_print_status("[shim] open(KERNEL.ELF)", status);
-    if status != EFI_SUCCESS || kernel_file.is_null() {
-        return None;
-    }
-    let kernel_file = &*kernel_file;
-
-    // Query the file size via GetInfo(EFI_FILE_INFO).
-    let mut info_buf = [0u8; 512];
-    let mut info_size = size_of::<[u8; 512]>();
-    let status = (kernel_file.get_info)(
-        kernel_file as *const FileProtocol as *mut FileProtocol,
-        &FILE_INFO_GUID,
-        &mut info_size,
-        info_buf.as_mut_ptr() as *mut c_void,
-    );
-    shim_print_status("[shim] get_info(FILE_INFO)", status);
-    if status != EFI_SUCCESS {
-        return None;
-    }
-    let file_info = &*(info_buf.as_ptr() as *const FileInfo);
-    let file_size = file_info.file_size as usize;
-
-    // Stage the ELF file in page-granular memory via AllocatePages (EFI_ALLOCATE_ANY_PAGES)
-    // rather than AllocatePool. Pool allocations commonly land in low memory, which can overlap
-    // the kernel's own fixed PT_LOAD addresses (e.g. 0x200000) -- when that happens, the later
-    // fixed-address AllocatePages call for that kernel segment fails, since those physical pages
-    // are already allocated (busy) regardless of their nominal memory type. AllocatePages with
-    // EFI_ALLOCATE_ANY_PAGES lets firmware pick any free range, which in practice tends to avoid
-    // the kernel's own low fixed addresses.
-    let pages_needed = (file_size + 0xFFF) / 0x1000;
-    let mut staging_addr: u64 = 0;
-    let status = (bs.allocate_pages)(
-        EFI_ALLOCATE_ANY_PAGES,
-        EFI_LOADER_DATA,
-        pages_needed.max(1),
-        &mut staging_addr,
-    );
-    shim_print_status("[shim] allocate_pages(ELF staging)", status);
-    if status != EFI_SUCCESS {
-        return None;
-    }
-    let buffer = staging_addr as *mut c_void;
-
-    let mut read_size = file_size;
-    let status = (kernel_file.read)(
-        kernel_file as *const FileProtocol as *mut FileProtocol,
-        &mut read_size,
-        buffer,
-    );
-    shim_print_status("[shim] read(KERNEL.ELF)", status);
-    if status != EFI_SUCCESS || read_size != file_size {
-        return None;
-    }
-
-    Some((buffer as *mut u8, file_size))
-}
-
-/// Parses the in-memory ELF64 image, `AllocatePages`-loads each `PT_LOAD` segment at its
-/// specified physical/virtual address (this kernel links as if identity-mapped), and returns the
-/// entry point.
-///
-/// # Safety
-///
-/// - `elf_data` must point to `elf_size` bytes of a valid, statically-linked ELF64 executable.
-/// - Must be called while boot services are still active (uses `AllocatePages`).
+/// - `elf_data` must point to `elf_size` valid bytes containing a well-formed, statically-linked
+///   (non-PIE) ELF64 executable, as produced by the kernel's own linker script.
+/// - `boot_services` must point to a valid, currently-active `EFI_BOOT_SERVICES`.
 unsafe fn load_elf_segments(
     boot_services: *mut BootServices,
-    elf_data: *const u8,
+    elf_data: *mut u8,
     elf_size: usize,
 ) -> Option<usize> {
-    if elf_size < size_of::<Elf64Header>() {
-        return None;
-    }
-
-    let header = &*(elf_data as *const Elf64Header);
-
-    // Sanity-check the ELF magic (`0x7F 'E' 'L' 'F'`) and that this is a 64-bit executable.
-    if &header.e_ident[0..4] != b"\x7FELF" || header.e_ident[4] != 2 {
-        return None;
-    }
-
     let bs = &*boot_services;
-    let ph_table = elf_data.add(header.e_phoff as usize) as *const Elf64ProgramHeader;
 
-    // Collect every PT_LOAD segment's page-aligned [start, end) range. This kernel's linker
-    // script places segments in two physically disjoint regions -- the tiny AP trampoline at
-    // 0x8000, and the main kernel image as several adjacent/page-sharing segments starting at
-    // 0x800000 -- so a single AllocateAddress spanning everything from the lowest to the highest
-    // p_vaddr (0x8000 to ~0x811158) would incorrectly try to reserve the large, mostly-reserved
-    // gap in between too, and fail. Conversely, allocating each segment separately fails for a
-    // different reason: adjacent/page-sharing segments within the main image share physical
-    // pages, so the first segment's allocation consumes the very page the next segment's
-    // AllocateAddress then finds already claimed (observed directly: 0x800000 succeeds, then
-    // 0x80E920 -- on the same page range as the first segment's tail -- fails).
-    //
-    // The correct middle ground: merge only segments whose page ranges are contiguous or
-    // overlapping into clusters, and issue one AllocateAddress per cluster. This naturally
-    // produces one cluster for the trampoline and one for the main kernel image, matching the
-    // two physically disjoint regions the linker script actually describes.
+    if elf_size < size_of::<Elf64Header>() {
+        shim_print("[shim] ELF too small");
+        return None;
+    }
+    let header = &*(elf_data as *const Elf64Header);
+    if &header.e_ident[0..4] != b"\x7FELF" {
+        shim_print("[shim] bad ELF magic");
+        return None;
+    }
+
     const MAX_SEGMENTS: usize = 16;
     let mut ranges: [(u64, u64); MAX_SEGMENTS] = [(0, 0); MAX_SEGMENTS];
-    let mut range_count = 0usize;
+    let mut range_count = 0;
 
     for i in 0..header.e_phnum as usize {
-        let ph = &*ph_table.add(i);
+        let ph_addr = elf_data as usize + header.e_phoff as usize + i * header.e_phentsize as usize;
+        let ph = &*(ph_addr as *const Elf64ProgramHeader);
         if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
             continue;
         }
         if range_count >= MAX_SEGMENTS {
-            shim_print("[shim] FATAL: too many PT_LOAD segments (increase MAX_SEGMENTS)");
+            shim_print("[shim] too many PT_LOAD segments, halting");
             return None;
         }
-        let start = ph.p_vaddr & !0xFFFu64;
-        let end = (ph.p_vaddr + ph.p_memsz + 0xFFF) & !0xFFFu64;
-        ranges[range_count] = (start, end);
+        let page_start = ph.p_vaddr & !(EFI_PAGE_SIZE as u64 - 1);
+        let page_end = (ph.p_vaddr + ph.p_memsz + EFI_PAGE_SIZE as u64 - 1)
+            & !(EFI_PAGE_SIZE as u64 - 1);
+        ranges[range_count] = (page_start, page_end);
         range_count += 1;
     }
-    if range_count == 0 {
-        return None;
-    }
 
-    // Simple insertion sort by start address (range_count is tiny, no need for anything fancier).
+    // Insertion-sort the (small, <= MAX_SEGMENTS) range list by start address.
     for i in 1..range_count {
         let mut j = i;
         while j > 0 && ranges[j - 1].0 > ranges[j].0 {
@@ -609,71 +751,58 @@ unsafe fn load_elf_segments(
         }
     }
 
-    // Merge adjacent/overlapping ranges into clusters, allocating each cluster as soon as the
-    // next range proves disjoint from it (or we run out of ranges).
-    let mut cluster_start = ranges[0].0;
-    let mut cluster_end = ranges[0].1;
-    for idx in 1..=range_count {
-        let is_last = idx == range_count;
-        let starts_new_cluster = !is_last && ranges[idx].0 > cluster_end;
-
-        if is_last || starts_new_cluster {
-            // Diagnostic: report what memory type (per the UEFI memory map) currently covers the
-            // start of this cluster, before attempting AllocateAddress. This tells us
-            // definitively *why* the allocation fails (e.g. EfiReservedMemoryType) instead of
-            // guessing.
-            report_memory_type_at(boot_services, "cluster", cluster_start);
-
-            let pages = ((cluster_end - cluster_start) as usize) / 0x1000;
-            let mut phys_addr = cluster_start;
-            let status = (bs.allocate_pages)(
-                /* EFI_ALLOCATE_ADDRESS */ 2,
-                EFI_LOADER_DATA,
-                pages,
-                &mut phys_addr,
-            );
-            // This kernel is statically linked at fixed addresses (not position-independent), so
-            // the entry point (`header.e_entry`) and every segment's `p_vaddr` are load-bearing:
-            // the kernel assumes it lives exactly where the ELF says it does. If AllocateAddress
-            // fails here (e.g. firmware has already reserved that physical range), falling back
-            // to a different address is actively wrong: the code ends up loaded somewhere the
-            // ELF header doesn't know about, while `e_entry` (used later to jump) still points
-            // at the *original* fixed address, which may now be unmapped/unbacked -- an instant
-            // instruction-fetch fault on entry, indistinguishable from "nothing happens" with no
-            // IDT/stack trust yet to report it. Treat this as a hard failure instead of silently
-            // falling back, so it surfaces as a visible diagnostic instead of a silent triple
-            // fault.
-            if status != EFI_SUCCESS {
-                shim_print("[shim] FATAL: AllocateAddress failed for a PT_LOAD cluster");
-                return None;
+    // Merge adjacent/overlapping ranges into clusters.
+    let mut clusters: [Cluster; MAX_SEGMENTS] = core::array::from_fn(|_| Cluster {
+        page_start: 0,
+        page_count: 0,
+    });
+    let mut cluster_count = 0;
+    for &(start, end) in ranges.iter().take(range_count) {
+        if cluster_count > 0 {
+            let last = &mut clusters[cluster_count - 1];
+            let last_end = last.page_start + last.page_count * EFI_PAGE_SIZE as u64;
+            if start <= last_end {
+                let new_end = last_end.max(end);
+                last.page_count = (new_end - last.page_start) / EFI_PAGE_SIZE as u64;
+                continue;
             }
+        }
+        clusters[cluster_count] = Cluster {
+            page_start: start,
+            page_count: (end - start) / EFI_PAGE_SIZE as u64,
+        };
+        cluster_count += 1;
+    }
 
-            if !is_last {
-                cluster_start = ranges[idx].0;
-                cluster_end = ranges[idx].1;
-            }
-        } else if ranges[idx].1 > cluster_end {
-            cluster_end = ranges[idx].1;
+    // Allocate each cluster at its fixed physical address.
+    for cluster in clusters.iter().take(cluster_count) {
+        let mut addr = cluster.page_start;
+        shim_print_label_hex("[shim] allocating cluster@", addr, "");
+        let status = (bs.allocate_pages)(
+            EFI_ALLOCATE_ADDRESS,
+            EFI_LOADER_DATA,
+            cluster.page_count as usize,
+            &mut addr,
+        );
+        if status != EFI_SUCCESS {
+            shim_print_label_hex("[shim] AllocateAddress FAILED for cluster@", cluster.page_start, "");
+            return None;
         }
     }
 
-    // Every cluster is now reserved; copy each segment's file bytes (and zero-fill its
-    // .bss-style tail) into its slice of whichever cluster reservation backs it.
+    // Copy each segment's file contents (identity-mapped vaddr == paddr), zero-filling BSS.
     for i in 0..header.e_phnum as usize {
-        let ph = &*ph_table.add(i);
+        let ph_addr = elf_data as usize + header.e_phoff as usize + i * header.e_phentsize as usize;
+        let ph = &*(ph_addr as *const Elf64ProgramHeader);
         if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
             continue;
         }
-
-        let dest = ph.p_vaddr as usize;
-
-        let src = elf_data.add(ph.p_offset as usize);
-        ptr::copy_nonoverlapping(src, dest as *mut u8, ph.p_filesz as usize);
-
-        // Zero-fill the `.bss`-style tail (`p_memsz > p_filesz`).
+        let src = (elf_data as usize + ph.p_offset as usize) as *const u8;
+        let dst = ph.p_vaddr as *mut u8;
+        ptr::copy_nonoverlapping(src, dst, ph.p_filesz as usize);
         if ph.p_memsz > ph.p_filesz {
-            let zero_start = (dest as *mut u8).add(ph.p_filesz as usize);
-            ptr::write_bytes(zero_start, 0, (ph.p_memsz - ph.p_filesz) as usize);
+            let bss_start = dst.add(ph.p_filesz as usize);
+            ptr::write_bytes(bss_start, 0, (ph.p_memsz - ph.p_filesz) as usize);
         }
     }
 
@@ -690,11 +819,37 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
         let rsdp_addr = find_acpi_rsdp(system_table as *const SystemTable).unwrap_or(0);
         shim_print("[shim] RSDP lookup done");
 
-        // One-time diagnostic: list every free (EfiConventionalMemory) region >= 2 MiB, before
-        // any AllocatePages/AllocateAddress calls below can consume/split one. Used to pick a
-        // genuinely free fixed kernel load address instead of guessing one address at a time via
-        // report_memory_type_at's per-segment check in load_elf_segments.
-        dump_conventional_memory(system_table_ref.boot_services);
+        // Query GOP for the active video mode's linear framebuffer, while boot services (needed
+        // for locate_protocol) are still available. Best-effort: a missing/unsupported GOP mode
+        // just means no video output, not a boot failure (see locate_gop_framebuffer's doc
+        // comment). The FramebufferInfo itself is placed in a fixed static (not the stack) so its
+        // address stays valid and known after the stack switch below, to be handed to the kernel
+        // as a plain pointer argument.
+        static mut FRAMEBUFFER_INFO: FramebufferInfo = FramebufferInfo {
+            base: 0,
+            width: 0,
+            height: 0,
+            pixels_per_scan_line: 0,
+            bgr: false,
+            frame_buffer_size: 0,
+        };
+        if let Some(fb) = locate_gop_framebuffer(system_table_ref.boot_services) {
+            FRAMEBUFFER_INFO = fb;
+        }
+        let framebuffer_info_addr = ptr::addr_of!(FRAMEBUFFER_INFO) as usize;
+
+        // Number of whole u32 pixels that are actually safe to write, clamped to the GOP's
+        // reported `frame_buffer_size` -- `pixels_per_scan_line * height` alone can overrun the
+        // real mapping (see `FramebufferInfo`'s doc comment), and an out-of-bounds write here
+        // happens before any IDT/GDT is set up, which faults straight into a triple fault/reset --
+        // so any raw framebuffer write (including the diagnostic fills in `efi_main`) must clamp its
+        // pixel count against this field, not just `pixels_per_scan_line * height`. `base` is `0` if no
+        // GOP framebuffer could be found, which the kernel must check before using any other field.
+        fn safe_pixel_count(fb: &FramebufferInfo) -> usize {
+            let reported = (fb.pixels_per_scan_line as usize) * (fb.height as usize);
+            let bound = fb.frame_buffer_size / 4;
+            reported.min(bound)
+        }
 
         let (elf_data, elf_size) =
             match load_kernel_elf(image_handle, system_table_ref.boot_services) {
@@ -740,11 +895,27 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
         let kernel_stack_top = (stack_phys as usize + KERNEL_STACK_PAGES * 0x1000) & !0xF;
         shim_print("[shim] kernel stack allocated");
 
+        // Print the handoff addresses here, *before* ExitBootServices -- doing this after
+        // ExitBootServices succeeds leaves almost no visible time on the vmconnect console before
+        // either a clean halt or a triple fault, making it impossible to actually read these
+        // values. Boot services (including Stall) are still fully valid here, so follow up with a
+        // multi-second Stall to give enough time to actually read the screen before continuing.
+        shim_print_symbolicated("[shim]  - `efi_main` = ", efi_main as *const () as usize);
+        shim_print_symbolicated("[shim]  - `kernel_entry` = ", entry);
+        shim_print_symbolicated("[shim]  - `rsdp_addr` = ", rsdp_addr);
+        shim_print_symbolicated("[shim]  - `framebuffer_info_addr` = ", framebuffer_info_addr);
+        shim_print_label_hex("[shim]  - `frame_buffer_size` = ", FRAMEBUFFER_INFO.frame_buffer_size as u64, "");
+        if !cfg!(feature = "qemu") {
+            shim_print("[shim] Stalling 5s before ExitBootServices (read the addresses above now)...");
+            (bs.stall)(5_000_000);
+        }
+
         // Fetch the current memory map and call `ExitBootServices` before jumping to the kernel;
         // firmware requires an exact, matching `map_key`, and *any* UEFI call between fetching the
         // map and calling ExitBootServices (even a ConOut/serial print) can itself allocate memory
-        // and invalidate that key. So: no `shim_print` calls in this section, and retry once via a
-        // fresh GetMemoryMap if the firmware reports the key is stale (EFI_INVALID_PARAMETER).
+        // and invalidate that key. So: no `shim_print`/`Stall` calls between the final
+        // `GetMemoryMap` refresh (inside the loop below) and `ExitBootServices` itself -- diagnose
+        // elsewhere in this function instead, not inside that loop.
         let mut map_size: usize = 0;
         let mut map_key: usize = 0;
         let mut descriptor_size: usize = 0;
@@ -763,7 +934,7 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
         map_size += 8 * descriptor_size.max(size_of::<u64>() * 8);
         let mut map_buffer: *mut c_void = ptr::null_mut();
         (bs.allocate_pool)(EFI_LOADER_DATA, map_size, &mut map_buffer);
-        shim_print("[shim] memory map buffer allocated");
+        shim_print("[shim] memory map buffer allocated, retrying ExitBootServices up to 3x");
 
         let mut status = EFI_SUCCESS;
         for _ in 0..3 {
@@ -785,10 +956,45 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
         }
 
         if status != EFI_SUCCESS {
-            shim_print("[shim] ExitBootServices FAILED, halting");
+            shim_print_label_hex("[shim] ExitBootServices FAILED after 3 attempts, status=", status as u64, ", halting");
             loop {}
         }
-        shim_print("[shim] ExitBoot Services succeeded, jumping to kernel entry");
+
+        // DIAGNOSTIC STAGE GATE: bisects exactly where post-ExitBootServices execution dies, by
+        // halting (cli/hlt loop) at increasing points instead of running the whole handoff every
+        // time. Raise DIAG_STAGE only once the previous stage is confirmed to NOT reset the VM.
+        //   0 = halt immediately, before touching the framebuffer or EFER at all.
+        //   1 = blue fill only, then halt.
+        //   2 = blue + red fill + EFER NXE clear, then halt.
+        //   3 = + green fill, then halt (before stack switch/call into kernel_entry).
+        //   4 = full handoff (stack switch + call into kernel_entry) -- original behavior.
+        const DIAG_STAGE: u8 = if cfg!(feature = "qemu") { 4 } else { 3 };
+
+        if DIAG_STAGE == 0 {
+            loop {
+                asm!("cli", "hlt", options(nomem, nostack));
+            }
+        }
+
+        // DIAGNOSTIC: shim_print/Stall no longer work past this point (boot services are gone),
+        // so paint the GOP framebuffer directly instead -- still identity-mapped, no firmware
+        // call needed. Blue = "ExitBootServices succeeded"; red = "about to touch EFER"; green
+        // = "survived EFER, about to switch stack and call kernel_entry". Remove once the handoff
+        // is confirmed clean. All three fills are clamped via `safe_pixel_count` to the GOP's
+        // reported `frame_buffer_size` so they cannot write past the actual mapped framebuffer.
+        if !cfg!(feature = "qemu") && FRAMEBUFFER_INFO.base != 0 {
+            let fb = FRAMEBUFFER_INFO.base as *mut u32;
+            let count = safe_pixel_count(&FRAMEBUFFER_INFO);
+            for i in 0..count {
+                fb.add(i).write_volatile(0x0000_00FF); // blue
+            }
+        }
+
+        if DIAG_STAGE == 1 {
+            loop {
+                asm!("cli", "hlt", options(nomem, nostack));
+            }
+        }
 
         // Clear EFER.NXE (bit 11) before jumping. UEFI firmware commonly enables NX enforcement
         // (EFER.NXE=1) and marks general-purpose/loader-data pages as no-execute per the memory
@@ -800,6 +1006,13 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
         // since there is no IDT/stack trust yet to even deliver that fault cleanly, cascading
         // straight to a triple fault. Disabling NX enforcement entirely sidesteps this until the
         // kernel has its own page tables with correctly-marked executable regions.
+        if !cfg!(feature = "qemu") && FRAMEBUFFER_INFO.base != 0 {
+            let fb = FRAMEBUFFER_INFO.base as *mut u32;
+            let count = safe_pixel_count(&FRAMEBUFFER_INFO);
+            for i in 0..count {
+                fb.add(i).write_volatile(0x00FF_0000); // red
+            }
+        }
         const IA32_EFER: u32 = 0xC000_0080;
         const EFER_NXE: u64 = 1 << 11;
         let efer_low: u32;
@@ -809,28 +1022,51 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
             in("ecx") IA32_EFER,
             out("eax") efer_low,
             out("edx") efer_high,
-            options(nomem, nostack, preserves_flags),
         );
-        let efer = ((efer_high as u64) << 32) | (efer_low as u64);
-        let new_efer = efer & !EFER_NXE;
+        let efer = ((efer_high as u64) << 32 | efer_low as u64) & !EFER_NXE;
         asm!(
             "wrmsr",
             in("ecx") IA32_EFER,
-            in("eax") (new_efer & 0xFFFF_FFFF) as u32,
-            in("edx") (new_efer >> 32) as u32,
-            options(nomem, nostack, preserves_flags),
+            in("eax") efer as u32,
+            in("edx") (efer >> 32) as u32,
         );
+
+        if DIAG_STAGE == 2 {
+            loop {
+                asm!("cli", "hlt", options(nomem, nostack));
+            }
+        }
+
+        // DIAGNOSTIC: green = "survived EFER rdmsr/wrmsr, about to switch stack and call
+        // kernel_entry". Remove once the handoff is confirmed clean.
+        if !cfg!(feature = "qemu") && FRAMEBUFFER_INFO.base != 0 {
+            let fb = FRAMEBUFFER_INFO.base as *mut u32;
+            let count = safe_pixel_count(&FRAMEBUFFER_INFO);
+            for i in 0..count {
+                fb.add(i).write_volatile(0x0000_FF00); // green
+            }
+        }
+
+        if DIAG_STAGE == 3 {
+            loop {
+                asm!("cli", "hlt", options(nomem, nostack));
+            }
+        }
 
         // Switch to the dedicated kernel stack and jump, all in one inline-asm block so there is
         // no window where the compiler could spill/use the (now-invalid) old stack in between the
-        // RSP switch and the call.
-        let kernel_entry: extern "sysv64" fn(usize) -> ! = core::mem::transmute(entry);
+        // RSP switch and the call. `_start` now takes a second argument, `framebuffer_info_addr`
+        // (passed in `rsi` per the SysV ABI), pointing at the static `FramebufferInfo` populated
+        // above; a `base` of 0 in it means "no GOP framebuffer available", which the kernel-side
+        // driver must check before touching any other field.
+        let kernel_entry: extern "sysv64" fn(usize, usize) -> ! = core::mem::transmute(entry);
         asm!(
             "mov rsp, {stack}",
             "call {entry}",
             stack = in(reg) kernel_stack_top,
             entry = in(reg) kernel_entry,
             in("rdi") rsdp_addr,
+            in("rsi") framebuffer_info_addr,
             options(noreturn),
         );
     }
@@ -838,222 +1074,11 @@ pub extern "efiapi" fn efi_main(image_handle: *mut c_void, system_table: *mut c_
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    shim_print("[shim] PANIC");
+    loop {
+        unsafe {
+            asm!("cli", "hlt", options(nomem, nostack));
+        }
+    }
 }
 
-/// Standard `EFI_MEMORY_DESCRIPTOR` layout (UEFI spec). `descriptor_size` returned by
-/// `GetMemoryMap` may be larger than `size_of::<MemoryDescriptor>()` (future spec revisions can
-/// append fields), so callers must always stride by `descriptor_size`, never
-/// `size_of::<MemoryDescriptor>()`.
-#[repr(C)]
-struct MemoryDescriptor {
-    memory_type: u32,
-    _padding: u32,
-    physical_start: u64,
-    _virtual_start: u64,
-    number_of_pages: u64,
-    _attribute: u64,
-}
-
-/// Walks the current UEFI memory map once and prints every `EfiConventionalMemory` (type 7)
-/// region's start address and size in pages, via `shim_print`. Intended to be called once, very
-/// early in `efi_main` (before any `AllocatePages`/`AllocateAddress` calls that could themselves
-/// shrink/split/consume a candidate region), so a genuinely free fixed load address for the
-/// kernel's static `PT_LOAD` segments can be chosen with confidence instead of trial-and-error
-/// against `report_memory_type_at` one guess at a time.
-///
-/// # Safety
-///
-/// - Must be called while boot services are still active.
-unsafe fn dump_conventional_memory(boot_services: *mut BootServices) {
-    let bs = &*boot_services;
-
-    let mut map_size: usize = 0;
-    let mut map_key: usize = 0;
-    let mut descriptor_size: usize = 0;
-    let mut descriptor_version: u32 = 0;
-
-    // First call is expected to fail with EFI_BUFFER_TOO_SMALL, just to learn `map_size`.
-    (bs.get_memory_map)(
-        &mut map_size,
-        ptr::null_mut(),
-        &mut map_key,
-        &mut descriptor_size,
-        &mut descriptor_version,
-    );
-
-    // Pad generously: allocating more descriptor slots can itself grow the memory map.
-    map_size += 8 * descriptor_size.max(size_of::<u64>() * 8);
-    let mut map_buffer: *mut c_void = ptr::null_mut();
-    let status = (bs.allocate_pool)(EFI_LOADER_DATA, map_size, &mut map_buffer);
-    if status != EFI_SUCCESS || map_buffer.is_null() {
-        shim_print("[shim] dump_conventional_memory: allocate_pool FAILED");
-        return;
-    }
-
-    let mut this_map_size = map_size;
-    let status = (bs.get_memory_map)(
-        &mut this_map_size,
-        map_buffer,
-        &mut map_key,
-        &mut descriptor_size,
-        &mut descriptor_version,
-    );
-    if status != EFI_SUCCESS {
-        shim_print("[shim] dump_conventional_memory: get_memory_map FAILED");
-        return;
-    }
-
-    const EFI_CONVENTIONAL_MEMORY: u32 = 7;
-
-    let num_descriptors = this_map_size / descriptor_size;
-    let base = map_buffer as *const u8;
-
-    shim_print("[shim] --- conventional (free) memory regions ---");
-    for i in 0..num_descriptors {
-        let desc = &*(base.add(i * descriptor_size) as *const MemoryDescriptor);
-        if desc.memory_type != EFI_CONVENTIONAL_MEMORY {
-            continue;
-        }
-        // Only regions with at least 512 pages (2 MiB) are worth considering as a kernel load
-        // site; smaller scraps would just make picking a new fixed origin harder to reason about.
-        if desc.number_of_pages < 512 {
-            continue;
-        }
-        shim_print_label_hex("[shim] free@", desc.physical_start, "");
-        shim_print_label_hex("[shim]   pages=", desc.number_of_pages, "");
-    }
-    shim_print("[shim] --- end conventional memory regions ---");
-}
-
-/// Fetches the current UEFI memory map into a freshly `AllocatePool`-ed buffer (caller leaks it;
-/// this is a short-lived diagnostic call during early boot) and reports, via `shim_print`, which
-/// memory descriptor (if any) covers `phys_addr`. Used to understand *why* a fixed-address
-/// `AllocatePages` call might fail for a specific physical address, instead of guessing.
-///
-/// # Safety
-///
-/// - Must be called while boot services are still active.
-unsafe fn report_memory_type_at(boot_services: *mut BootServices, label: &str, phys_addr: u64) {
-    let bs = &*boot_services;
-
-    let mut map_size: usize = 0;
-    let mut map_key: usize = 0;
-    let mut descriptor_size: usize = 0;
-    let mut descriptor_version: u32 = 0;
-
-    // First call is expected to fail with EFI_BUFFER_TOO_SMALL, just to learn `map_size`.
-    (bs.get_memory_map)(
-        &mut map_size,
-        ptr::null_mut(),
-        &mut map_key,
-        &mut descriptor_size,
-        &mut descriptor_version,
-    );
-
-    // Pad generously: allocating more descriptor slots can itself grow the memory map.
-    map_size += 8 * descriptor_size.max(size_of::<u64>() * 8);
-    let mut map_buffer: *mut c_void = ptr::null_mut();
-    let status = (bs.allocate_pool)(EFI_LOADER_DATA, map_size, &mut map_buffer);
-    if status != EFI_SUCCESS || map_buffer.is_null() {
-        shim_print("[shim] report_memory_type_at: allocate_pool FAILED");
-        return;
-    }
-
-    let mut this_map_size = map_size;
-    let status = (bs.get_memory_map)(
-        &mut this_map_size,
-        map_buffer,
-        &mut map_key,
-        &mut descriptor_size,
-        &mut descriptor_version,
-    );
-    if status != EFI_SUCCESS {
-        shim_print("[shim] report_memory_type_at: get_memory_map FAILED");
-        return;
-    }
-
-    let num_descriptors = this_map_size / descriptor_size;
-    let base = map_buffer as *const u8;
-
-    let mut found = false;
-    for i in 0..num_descriptors {
-        let desc = &*(base.add(i * descriptor_size) as *const MemoryDescriptor);
-        let start = desc.physical_start;
-        let end = start + desc.number_of_pages * 0x1000;
-        if phys_addr >= start && phys_addr < end {
-            found = true;
-            // Print label, the memory type (as decimal), and whether it's a "free" type
-            // (0 = EfiReservedMemoryType is NOT free; 3/4/7 = Loader/BootServices Code/Data and
-            // Conventional memory ARE free/available for AllocateAddress).
-            let mut buf = *b"[shim] mem@XXXXXXXXXXXX type=XXX\0";
-            // "[shim] mem@" is 11 chars (indices 0..10), so the first hex digit goes at index 11.
-            // Print the queried phys_addr (e.g. ph.p_vaddr) itself -- NOT desc.physical_start,
-            // which is merely the start of whichever memory-map region happens to contain it.
-            // Printing the descriptor's start address here was the actual bug: it silently
-            // substituted a plausible-looking but unrelated address (the covering region's
-            // boundary) for the segment address actually being checked, making it look like
-            // the shim had read the wrong p_vaddr from the ELF when it hadn't.
-            let hex_start = 11;
-            for j in 0..12 {
-                let nibble = (phys_addr >> ((11 - j) * 4)) & 0xF;
-                buf[hex_start + j] = if nibble < 10 {
-                    b'0' + nibble as u8
-                } else {
-                    b'A' + (nibble - 10) as u8
-                };
-            }
-            let type_start = 29;
-            let t = desc.memory_type;
-            buf[type_start] = b'0' + ((t / 100) % 10) as u8;
-            buf[type_start + 1] = b'0' + ((t / 10) % 10) as u8;
-            buf[type_start + 2] = b'0' + (t % 10) as u8;
-            let msg_bytes = &buf[..buf.len() - 1];
-            if let Ok(msg) = core::str::from_utf8(msg_bytes) {
-                shim_print(msg);
-            }
-            break;
-        }
-    }
-
-    if !found {
-        shim_print_label_hex("[shim] mem@", phys_addr, " type=NOT_IN_MAP (reserved/unmapped)");
-    }
-
-    let _ = label; // label currently unused beyond call-site context; kept for future use.
-}
-
-/// Prints `prefix` + `addr` (as 12 hex digits) + `suffix`, all concatenated, via `shim_print`.
-fn shim_print_label_hex(prefix: &str, addr: u64, suffix: &str) {
-    let mut buf = [0u8; 96];
-    let mut pos = 0;
-    for &b in prefix.as_bytes() {
-        if pos >= buf.len() {
-            break;
-        }
-        buf[pos] = b;
-        pos += 1;
-    }
-    for j in 0..12 {
-        if pos >= buf.len() {
-            break;
-        }
-        let nibble = (addr >> ((11 - j) * 4)) & 0xF;
-        buf[pos] = if nibble < 10 {
-            b'0' + nibble as u8
-        } else {
-            b'A' + (nibble - 10) as u8
-        };
-        pos += 1;
-    }
-    for &b in suffix.as_bytes() {
-        if pos >= buf.len() {
-            break;
-        }
-        buf[pos] = b;
-        pos += 1;
-    }
-    if let Ok(msg) = core::str::from_utf8(&buf[..pos]) {
-        shim_print(msg);
-    }
-}

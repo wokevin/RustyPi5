@@ -23,6 +23,7 @@ pub mod gdt;
 pub mod idt;
 pub mod memory;
 pub mod trampoline;
+pub mod video;
 
 //--------------------------------------------------------------------------------------------------
 // Public Code
@@ -57,9 +58,13 @@ pub mod driver {
 
         super::exception::asynchronous::register_hyperv_irq_manager();
 
-        super::console::UART.init();
+        let console_result = super::console::UART.init();
 
         crate::console::register_console(&super::console::UART);
+
+        if let Err(e) = console_result {
+            crate::warn!("Framebuffer console unavailable: {}", e);
+        }
 
         if let Err(e) = unsafe { super::cpu::discover_cores() } {
             crate::warn!("ACPI CPU discovery failed, continuing single-core: {}", e);
@@ -71,8 +76,12 @@ pub mod driver {
     /// Minimal console bring-up for unit tests, mirroring the other BSPs' test hook.
     #[cfg(feature = "test_build")]
     pub fn qemu_bring_up_console() {
-        super::console::UART.init();
+        let console_result = super::console::UART.init();
 
         crate::console::register_console(&super::console::UART);
+
+        if let Err(e) = console_result {
+            crate::warn!("Framebuffer console unavailable: {}", e);
+        }
     }
 }

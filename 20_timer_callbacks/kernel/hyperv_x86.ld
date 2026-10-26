@@ -26,10 +26,13 @@
  * regions, so there is no ambiguity about section ordering or the location counter.
  */
 
+/* QEMU's EDK2 firmware has a different low-memory layout. The launcher overrides
+ * the kernel base without changing the default Hyper-V layout or the SIPI vector.
+ */
 MEMORY
 {
-	TRAMPOLINE (rwx) : ORIGIN = 0x8000,   LENGTH = 4K
-	RAM        (rwx) : ORIGIN = 0x800000, LENGTH = 32M
+	TRAMPOLINE (rwx) : ORIGIN = 0x8000, LENGTH = 4K
+	RAM        (rwx) : ORIGIN = DEFINED(__kernel_load_addr) ? __kernel_load_addr : 0x800000, LENGTH = 32M
 }
 
 ENTRY(_start)
