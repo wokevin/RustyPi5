@@ -14,16 +14,9 @@
 //! `cpu::HyperVSmpRelease::release_core`). Real paging and interrupts are added incrementally in
 //! subsequent steps.
 
-pub mod acpi;
-pub mod apic;
-pub mod console;
-pub mod cpu;
-pub mod exception;
-pub mod gdt;
-pub mod idt;
-pub mod memory;
-pub mod trampoline;
-pub mod video;
+pub use super::_x86::{
+    acpi, apic, console, cpu, exception, gdt, idt, memory, trampoline, user, video,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Public Code
@@ -56,7 +49,7 @@ pub mod driver {
 
         unsafe { super::gdt::init() };
 
-        super::exception::asynchronous::register_hyperv_irq_manager();
+        super::exception::asynchronous::register_x86_irq_manager();
 
         let console_result = super::console::UART.init();
 

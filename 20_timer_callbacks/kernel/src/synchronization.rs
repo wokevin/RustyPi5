@@ -156,6 +156,12 @@ impl<T> interface::ReadWriteEx for InitStateLock<T> {
             state::state_manager().is_init(),
             "InitStateLock::write called after kernel init phase"
         );
+        #[cfg(feature = "bsp_qemu_x86")]
+        assert!(
+            exception::asynchronous::is_local_irq_masked(),
+            "InitStateLock::write requires masked interrupts"
+        );
+        #[cfg(not(feature = "bsp_qemu_x86"))]
         assert!(
             !exception::asynchronous::is_local_irq_masked(),
             "InitStateLock::write called with IRQs unmasked"

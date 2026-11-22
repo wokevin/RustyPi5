@@ -148,7 +148,11 @@ pub mod console;
 pub mod cpu;
 pub mod driver;
 pub mod exception;
+#[cfg(feature = "bsp_qemu_x86")]
+pub mod filesystem;
 pub mod memory;
+#[cfg(feature = "bsp_qemu_x86")]
+pub mod network;
 pub mod print;
 pub mod state;
 pub mod symbols;

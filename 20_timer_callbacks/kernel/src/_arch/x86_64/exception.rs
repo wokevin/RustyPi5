@@ -28,6 +28,9 @@ pub fn current_privilege_level() -> (PrivilegeLevel, &'static str) {
 
     #[cfg(feature = "bsp_hyperv_x86")]
     return (PrivilegeLevel::Kernel, "Hyper-V (ring 0 assumed)");
+
+    #[cfg(feature = "bsp_qemu_x86")]
+    return (PrivilegeLevel::Kernel, "QEMU (ring 0 assumed)");
 }
 
 /// Init exception handling.

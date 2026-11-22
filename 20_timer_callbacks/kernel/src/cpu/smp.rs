@@ -153,7 +153,7 @@ pub unsafe fn bring_up_all_cores(
     entry_point: usize,
     stack_top_for_core: impl Fn(CpuId) -> usize,
 ) -> usize {
-    const POLL_ATTEMPTS: usize = 100_000;
+    const POLL_ATTEMPTS: usize = 10_000_000;
 
     let method = bsp::cpu::smp_release_method();
     let mut brought_up = 0;
@@ -165,8 +165,14 @@ pub unsafe fn bring_up_all_cores(
 
         let stack_top = stack_top_for_core(cpu.id());
 
-        if method.release_core(cpu.id(), entry_point, stack_top).is_err() {
-            continue;
+        if let Err(error) = method.release_core(cpu.id(), entry_point, stack_top) {
+            #[cfg(feature = "bsp_qemu_x86")]
+            panic!("CPU {} startup failed: {:?}", cpu.id().raw(), error);
+            #[cfg(not(feature = "bsp_qemu_x86"))]
+            {
+                crate::warn!("CPU {} startup failed: {:?}", cpu.id().raw(), error);
+                continue;
+            }
         }
 
         for _ in 0..POLL_ATTEMPTS {
@@ -179,6 +185,11 @@ pub unsafe fn bring_up_all_cores(
 
         if cpu.is_online() {
             brought_up += 1;
+        } else {
+            #[cfg(feature = "bsp_qemu_x86")]
+            panic!("CPU {} did not acknowledge startup", cpu.id().raw());
+            #[cfg(not(feature = "bsp_qemu_x86"))]
+            crate::warn!("CPU {} did not acknowledge startup", cpu.id().raw());
         }
     }
 

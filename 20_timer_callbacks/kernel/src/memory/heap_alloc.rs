@@ -8,9 +8,12 @@ use crate::{
     backtrace, common, debug, info,
     memory::{Address, Virtual},
     synchronization,
-    synchronization::IRQSafeNullLock,
     warn,
 };
+#[cfg(not(feature = "bsp_qemu_x86"))]
+use crate::synchronization::IRQSafeNullLock as HeapLock;
+#[cfg(feature = "bsp_qemu_x86")]
+use crate::synchronization::SpinLock as HeapLock;
 #[cfg(not(feature = "bsp_host"))]
 use crate::bsp;
 use alloc::alloc::{GlobalAlloc, Layout};
@@ -23,7 +26,7 @@ use linked_list_allocator::Heap as LinkedListHeap;
 
 /// A heap allocator that can be lazyily initialized.
 pub struct HeapAllocator {
-    inner: IRQSafeNullLock<LinkedListHeap>,
+    inner: HeapLock<LinkedListHeap>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,7 +86,7 @@ impl HeapAllocator {
     /// Create an instance.
     pub const fn new() -> Self {
         Self {
-            inner: IRQSafeNullLock::new(LinkedListHeap::empty()),
+            inner: HeapLock::new(LinkedListHeap::empty()),
         }
     }
 

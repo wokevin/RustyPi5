@@ -18,8 +18,20 @@ mod host;
 #[cfg(feature = "bsp_host")]
 pub use host::*;
 
+#[cfg(all(feature = "bsp_hyperv_x86", feature = "bsp_qemu_x86"))]
+compile_error!("Select either the Hyper-V BSP or the QEMU BSP, not both.");
+
+#[cfg(any(feature = "bsp_hyperv_x86", feature = "bsp_qemu_x86"))]
+mod _x86;
+
 #[cfg(feature = "bsp_hyperv_x86")]
 mod hyperv_x86;
 
 #[cfg(feature = "bsp_hyperv_x86")]
 pub use hyperv_x86::*;
+
+#[cfg(feature = "bsp_qemu_x86")]
+mod qemu_x86;
+
+#[cfg(feature = "bsp_qemu_x86")]
+pub use qemu_x86::*;

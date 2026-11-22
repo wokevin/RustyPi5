@@ -38,7 +38,7 @@ pub fn wait_forever() -> ! {
         std::thread::park();
     }
 
-    #[cfg(feature = "bsp_hyperv_x86")]
+    #[cfg(any(feature = "bsp_hyperv_x86", feature = "bsp_qemu_x86"))]
     loop {
         unsafe {
             core::arch::asm!("hlt");

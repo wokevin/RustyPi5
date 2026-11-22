@@ -19,3 +19,6 @@ package*.json
 # (boot.vhdx) and/or machine-specific runtime artifacts, not source.
 Shims/hyperv-shim/boot.vhdx
 20_timer_callbacks/*.log
+
+# Persistent QEMU filesystem disk, deliberately outside Cargo's target directory.
+20_timer_callbacks/rustypi5.img

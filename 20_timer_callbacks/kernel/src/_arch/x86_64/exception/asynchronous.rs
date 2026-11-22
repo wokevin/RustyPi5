@@ -1,74 +1,99 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//
-// Copyright (c) 2018-2023 Andre Richter <andre.o.richter@gmail.com>
 
-//! Architectural asynchronous exception handling.
-//!
-//! # Orientation
-//!
-//! Since arch modules are imported into generic modules using the path attribute, the path of this
-//! file is:
-//!
-//! crate::exception::asynchronous::arch_asynchronous
+//! Architectural interrupt masking.
 
+#[cfg(feature = "bsp_qemu_x86")]
+use core::arch::asm;
+#[cfg(not(feature = "bsp_qemu_x86"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-//--------------------------------------------------------------------------------------------------
-// Private Definitions
-//--------------------------------------------------------------------------------------------------
-
-/// Tracks whether IRQs are currently masked on the (single) core.
-///
-/// `true` means masked/disabled. On `bsp_host`, this is a pure bookkeeping flag with no real
-/// hardware behind it. On `bsp_hyperv_x86`, this is also a placeholder for now — real `cli`/`sti`
-/// based masking is not yet implemented, pending IDT/APIC bring-up.
+#[cfg(not(feature = "bsp_qemu_x86"))]
 static IRQ_MASKED: AtomicBool = AtomicBool::new(false);
 
-//--------------------------------------------------------------------------------------------------
-// Public Code
-//--------------------------------------------------------------------------------------------------
-
-/// Returns whether IRQs are masked on the executing core.
+#[inline(always)]
 pub fn is_local_irq_masked() -> bool {
-    IRQ_MASKED.load(Ordering::Relaxed)
+    #[cfg(feature = "bsp_qemu_x86")]
+    {
+        let flags: u64;
+        unsafe {
+            asm!(
+                "pushfq",
+                "pop {}",
+                out(reg) flags,
+                options(preserves_flags),
+            );
+        }
+        flags & (1 << 9) == 0
+    }
+
+    #[cfg(not(feature = "bsp_qemu_x86"))]
+    {
+        IRQ_MASKED.load(Ordering::Relaxed)
+    }
 }
 
-/// Unmask IRQs on the executing core.
 #[inline(always)]
 pub fn local_irq_unmask() {
+    #[cfg(feature = "bsp_qemu_x86")]
+    unsafe {
+        asm!("sti", options(nostack));
+    }
+
+    #[cfg(not(feature = "bsp_qemu_x86"))]
     IRQ_MASKED.store(false, Ordering::Relaxed);
 }
 
-/// Mask IRQs on the executing core.
 #[inline(always)]
 pub fn local_irq_mask() {
+    #[cfg(feature = "bsp_qemu_x86")]
+    unsafe {
+        asm!("cli", options(nostack));
+    }
+
+    #[cfg(not(feature = "bsp_qemu_x86"))]
     IRQ_MASKED.store(true, Ordering::Relaxed);
 }
 
-/// Mask IRQs on the executing core and return the previously saved interrupt mask bits.
 #[inline(always)]
 pub fn local_irq_mask_save() -> u64 {
-    let saved = IRQ_MASKED.load(Ordering::Relaxed) as u64;
-    local_irq_mask();
+    #[cfg(feature = "bsp_qemu_x86")]
+    {
+        let flags: u64;
+        unsafe {
+            asm!(
+                "pushfq",
+                "pop {}",
+                "cli",
+                out(reg) flags,
+            );
+        }
+        u64::from(flags & (1 << 9) == 0)
+    }
 
-    saved
+    #[cfg(not(feature = "bsp_qemu_x86"))]
+    {
+        let saved = IRQ_MASKED.load(Ordering::Relaxed) as u64;
+        local_irq_mask();
+        saved
+    }
 }
 
-/// Restore the interrupt mask bits using the callee's argument.
-///
-/// # Invariant
-///
-/// - No sanity checks on the input.
 #[inline(always)]
 pub fn local_irq_restore(saved: u64) {
-    IRQ_MASKED.store(saved != 0, Ordering::Relaxed);
+    if saved == 0 {
+        local_irq_unmask();
+    } else {
+        local_irq_mask();
+    }
 }
 
-/// Print the exception status.
 pub fn print_state() {
-    use crate::info;
-
-    let to_mask_str = |x| -> _ { if x { "Masked" } else { "Unmasked" } };
-
-    info!("      IRQ:    {}", to_mask_str(IRQ_MASKED.load(Ordering::Relaxed)));
+    crate::info!(
+        "      IRQ:    {}",
+        if is_local_irq_masked() {
+            "Masked"
+        } else {
+            "Unmasked"
+        }
+    );
 }

@@ -15,6 +15,11 @@ mod arch_cpu;
 mod boot;
 
 pub mod smp;
+pub mod topology;
+#[cfg(feature = "bsp_qemu_x86")]
+pub mod kernel_worker;
+#[cfg(feature = "bsp_qemu_x86")]
+pub mod work_queue;
 
 //--------------------------------------------------------------------------------------------------
 // Architectural Public Reexports

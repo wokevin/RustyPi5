@@ -71,7 +71,7 @@ pub fn uptime() -> Duration {
 ///
 /// TODO: Bare-metal placeholder. Returns zero always, since there is no calibrated TSC frequency
 /// yet to convert cycle counts into a `Duration`.
-#[cfg(feature = "bsp_hyperv_x86")]
+#[cfg(any(feature = "bsp_hyperv_x86", feature = "bsp_qemu_x86"))]
 pub fn uptime() -> Duration {
     Duration::from_secs(0)
 }
@@ -90,7 +90,7 @@ pub fn spin_for(duration: Duration) {
 /// TODO: Bare-metal placeholder. Since `uptime()` always returns zero for now, this cannot
 /// actually measure elapsed time yet; it currently just spins the CPU a fixed number of
 /// iterations as a rough, uncalibrated stand-in.
-#[cfg(feature = "bsp_hyperv_x86")]
+#[cfg(any(feature = "bsp_hyperv_x86", feature = "bsp_qemu_x86"))]
 pub fn spin_for(_duration: Duration) {
     for _ in 0..1_000_000 {
         core::hint::spin_loop();
@@ -127,7 +127,7 @@ pub fn set_timeout_irq(due_time: Duration) {
 /// Program a "timer IRQ" to fire after `due_time` has passed.
 ///
 /// TODO: Bare-metal placeholder — no-op for now, pending real APIC-timer/HPET wiring.
-#[cfg(feature = "bsp_hyperv_x86")]
+#[cfg(any(feature = "bsp_hyperv_x86", feature = "bsp_qemu_x86"))]
 pub fn set_timeout_irq(_due_time: Duration) {}
 
 /// Conclude a pending timeout IRQ.

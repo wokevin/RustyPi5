@@ -31,14 +31,20 @@
  */
 MEMORY
 {
+	AP_BOOT    (rw)  : ORIGIN = 0x7000, LENGTH = 4K
 	TRAMPOLINE (rwx) : ORIGIN = 0x8000, LENGTH = 4K
 	RAM        (rwx) : ORIGIN = DEFINED(__kernel_load_addr) ? __kernel_load_addr : 0x800000, LENGTH = 32M
+	USER       (rwx) : ORIGIN = 0x10000000, LENGTH = 2M
 }
 
 ENTRY(_start)
 
 SECTIONS
 {
+	.ap_boot (NOLOAD) : {
+		. += 4K;
+	} > AP_BOOT
+
 	.text.ap_trampoline : {
 		KEEP(*(.text.ap_trampoline))
 	} > TRAMPOLINE
@@ -63,6 +69,35 @@ SECTIONS
 		*(.bss .bss.*)
 		*(COMMON)
 	} > RAM
+
+	.user_text ORIGIN(USER) : ALIGN(4K) {
+		__user_text_start = .;
+		KEEP(*(.user_text .user_text.*))
+		. = ALIGN(4K);
+		__user_text_end = .;
+	} > USER
+
+	.user_rodata : ALIGN(4K) {
+		__user_rodata_start = .;
+		KEEP(*(.user_rodata .user_rodata.*))
+		. = ALIGN(4K);
+		__user_rodata_end = .;
+	} > USER
+
+	.user_data : ALIGN(4K) {
+		__user_data_start = .;
+		KEEP(*(.user_data .user_data.*))
+		. = ALIGN(4K);
+		__user_data_end = .;
+	} > USER
+
+	.user_stack (NOLOAD) : ALIGN(4K) {
+		. += 4K;
+		__user_stack_start = .;
+		. += 16K;
+		__user_stack_end = .;
+		. += 4K;
+	} > USER
 
 	.eh_frame : {
 		KEEP(*(.eh_frame))

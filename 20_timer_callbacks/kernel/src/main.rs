@@ -17,10 +17,11 @@
 extern crate alloc;
 
 use libkernel::{
-    bsp, cpu, driver, exception, info, memory,
-    synchronization::{interface::Mutex, SpinLock},
-    state, time,
+    bsp, cpu, driver, exception, info, memory, state, time,
 };
+
+#[cfg(not(feature = "bsp_qemu_x86"))]
+use libkernel::synchronization::{interface::Mutex, SpinLock};
 
 /// Shared counter used to demonstrate that cross-core mutual exclusion actually works once
 /// secondary cores are brought online.
@@ -30,9 +31,11 @@ use libkernel::{
 /// expected `NUM_CORES * INCREMENTS_PER_CORE` due to lost updates from concurrent, unsynchronized
 /// read-modify-write races. Since the total exactly matches the expected value on real
 /// hardware/QEMU with multiple cores, this is a correctness test, not just a liveness test.
+#[cfg(not(feature = "bsp_qemu_x86"))]
 static SHARED_COUNTER: SpinLock<u64> = SpinLock::new(0);
 
 /// Number of increments each core performs on `SHARED_COUNTER`.
+#[cfg(not(feature = "bsp_qemu_x86"))]
 const INCREMENTS_PER_CORE: u64 = 100_000;
 
 /// Increment `SHARED_COUNTER` by `INCREMENTS_PER_CORE`, one at a time, taking the lock for each
@@ -43,6 +46,7 @@ const INCREMENTS_PER_CORE: u64 = 100_000;
 /// Prints a "thread N" style identity line before starting and after finishing, using the core's
 /// raw affinity value (which is a flat `0..N` index on Raspberry Pi's single-cluster topology) as
 /// the thread number.
+#[cfg(not(feature = "bsp_qemu_x86"))]
 fn hammer_shared_counter() {
     let thread_id = cpu::smp::core_id().raw();
 
@@ -65,6 +69,8 @@ fn hammer_shared_counter() {
 /// - Printing will not work until the respective driver's MMIO is remapped.
 #[cfg_attr(not(feature = "bsp_host"), no_mangle)]
 unsafe fn kernel_init() -> ! {
+    #[cfg(feature = "bsp_qemu_x86")]
+    exception::asynchronous::local_irq_mask();
     exception::handling_init();
 
     #[cfg(not(feature = "bsp_host"))]
@@ -104,15 +110,24 @@ unsafe fn kernel_init() -> ! {
         panic!("Error initializing SMP spin-table mailboxes: {}", x);
     }
 
-    // Unmask interrupts on the boot CPU core.
+    // QEMU enables hardware interrupts only after the worker and APIC are ready.
+    #[cfg(not(feature = "bsp_qemu_x86"))]
     exception::asynchronous::local_irq_unmask();
 
     // Announce conclusion of the kernel_init() phase.
     state::state_manager().transition_to_single_core_main();
 
-    // Bring up secondary cores, if any respond. This is best-effort discovery, not an assumption
-    // of a fixed core count; boards/builds where this isn't supported (e.g. host) will simply
-    // bring up zero secondary cores.
+    #[cfg(feature = "bsp_qemu_x86")]
+    {
+        if let Err(message) = bsp::user::prepare() {
+            panic!("Cannot reserve kernel CPU: {}", message);
+        }
+        if let Err(message) = cpu::kernel_worker::init() {
+            panic!("Cannot initialize kernel worker: {}", message);
+        }
+    }
+
+    // Bring up secondary cores discovered by the BSP; QEMU requires startup acknowledgement.
     #[cfg(not(feature = "bsp_host"))]
     {
         // Secondary cores must be released into the assembly `_start_secondary` entry point, NOT
@@ -154,6 +169,12 @@ unsafe fn kernel_init() -> ! {
 #[cfg(not(feature = "bsp_host"))]
 #[no_mangle]
 unsafe extern "C" fn kernel_init_secondary() -> ! {
+    #[cfg(feature = "bsp_qemu_x86")]
+    {
+        bsp::idt::load_secondary();
+        bsp::gdt::init_secondary();
+        bsp::apic::init_local().expect("Cannot initialize secondary local APIC");
+    }
     let this_core = cpu::smp::core_id();
 
     // Find and mark this core online in the board's static core table.
@@ -164,8 +185,9 @@ unsafe extern "C" fn kernel_init_secondary() -> ! {
         }
     }
 
-    // Secondary cores park after announcing themselves; task/scheduler work will be added in a
-    // later step.
+    #[cfg(feature = "bsp_qemu_x86")]
+    bsp::user::secondary_idle();
+    #[cfg(not(feature = "bsp_qemu_x86"))]
     cpu::wait_forever();
 }
 
@@ -203,9 +225,8 @@ fn kernel_main() -> ! {
     info!("Kernel heap:");
     memory::heap_alloc::kernel_heap_allocator().print_usage();
 
-    // The boot core also participates in the shared-counter race, so it contends against whatever
-    // secondary cores came online.
-    #[cfg(not(feature = "bsp_host"))]
+    // QEMU secondaries wait for explicit user placement rather than running this legacy demo.
+    #[cfg(all(not(feature = "bsp_host"), not(feature = "bsp_qemu_x86")))]
     {
         let online_cores = cpu::smp::cores().iter().filter(|c| c.is_online()).count();
 
@@ -242,10 +263,24 @@ fn kernel_main() -> ! {
     time::time_manager()
         .set_timeout_periodic(Duration::from_secs(1), Box::new(|| info!("Periodic 1 sec")));
 
-    #[cfg(all(feature = "bsp_hyperv_x86", feature = "qemu"))]
-    info!("Boot complete. CPU idle; no shell or network driver yet.");
-    #[cfg(not(all(feature = "bsp_hyperv_x86", feature = "qemu")))]
+    #[cfg(feature = "bsp_qemu_x86")]
+    {
+        let user_cpu = bsp::cpu::user_cpu().expect("No online CPU available for users");
+        info!("CPU topology: {} discovered, {} online; CPU 0 reserved for kernel services",
+            bsp::cpu::core_count(), cpu::smp::cores().iter().filter(|cpu| cpu.is_online()).count());
+        for cpu in cpu::smp::cores() {
+            info!("CPU {}: APIC {}, online={}, role={}", cpu.id().raw(),
+                bsp::cpu::hardware_id_for(cpu.id()).unwrap(), cpu.is_online(),
+                if cpu.id().raw() == 0 { "kernel" } else { "user-eligible" });
+        }
+        let network = libkernel::network::initialize().expect("Cannot initialize protected networking");
+        info!("Kernel remains on CPU 0; launching user shell on CPU {}", user_cpu.raw());
+        bsp::user::launch_on(user_cpu).expect("Cannot launch user shell on secondary CPU");
+        cpu::kernel_worker::run(network);
+    }
+    #[cfg(not(feature = "bsp_qemu_x86"))]
     info!("Echoing input now");
+    #[cfg(not(feature = "bsp_qemu_x86"))]
     cpu::wait_forever();
 }
 

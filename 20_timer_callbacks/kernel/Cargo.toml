@@ -12,6 +12,7 @@ bsp_rpi4 = ["tock-registers"]
 bsp_rpi5 = ["tock-registers"]
 bsp_host = []
 bsp_hyperv_x86 = []
+bsp_qemu_x86 = ["qemu"]
 test_build = []
 
 # When building for QEMU (raspi3b/raspi4b), secondary cores must be released via PSCI CPU_ON.
