@@ -8,7 +8,6 @@ node_modules
 
 Gemfile.lock
 package*.json
-/.github/copilot-instructions.md
 
 # Visual Studio's own internal cache/solution index files -- these are locked/actively written to
 # while the IDE is open (causing `git add --renormalize .` to fail outright with "Permission
